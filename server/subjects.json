@@ -1,0 +1,16 @@
+[
+  {
+    "id": "75bad0b4-2423-4253-ae42-e3861ed21228",
+    "name": "DBMS",
+    "description": "",
+    "createdAt": "2025-10-21T16:26:59.898424",
+    "notesCount": 1
+  },
+  {
+    "id": "ab74dcca-1e38-4bd2-91bc-d4ea458f333d",
+    "name": "IOT",
+    "description": "",
+    "createdAt": "2025-10-21T16:30:06.943088",
+    "notesCount": 1
+  }
+]
