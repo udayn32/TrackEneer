@@ -2,11 +2,11 @@ import os
 import uuid
 import chromadb
 import requests
+import aiohttp
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sentence_transformers import SentenceTransformer
-from neo4j import GraphDatabase
 from datetime import datetime, timedelta, timezone
 import pytz
 import spacy
@@ -62,17 +62,10 @@ def _parse_iso_to_dt(val):
         return None
 
 # --- 2. Database & AI Model Setup ---
-NEO4J_URI = "neo4j://127.0.0.1:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "8828142901"
+from db import get_driver
 
-try:
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-    driver.verify_connectivity()
-    print("Neo4j connection successful.")
-except Exception as e:
-    print(f"Error connecting to Neo4j: {e}")
-    exit()
+driver = get_driver()
+print("Neo4j connection successful.")
 
 print("Initializing AI model configuration...")
 
@@ -494,22 +487,206 @@ async def get_upcoming_deadlines():
         print(f"Error fetching deadlines: {e}")
         raise HTTPException(status_code=500, detail="Could not fetch upcoming deadlines")
 
+# --- Quote Cache for External API ---
+QUOTE_CACHE = {}
+QUOTE_CACHE_TAGS = {
+    'schedule': ['productivity', 'planning', 'time management'],
+    'study': ['learning', 'knowledge', 'education'],
+    'insights': ['success', 'growth', 'motivation'],
+    'placement': ['work', 'career', 'success']
+}
+
+# Fallback quotes (static list)
+FALLBACK_QUOTES = [
+    {"content": "The beautiful thing about learning is that no one can take it away from you.", "author": "B.B. King", "category": "study"},
+    {"content": "Live as if you were to die tomorrow. Learn as if you were to live forever.", "author": "Mahatma Gandhi", "category": "study"},
+    {"content": "The expert in anything was once a beginner.", "author": "Helen Hayes", "category": "study"},
+    {"content": "Success is the sum of small efforts, repeated day in and day out.", "author": "Robert Collier", "category": "schedule"},
+    {"content": "There are no shortcuts to any place worth going.", "author": "Beverly Sills", "category": "schedule"},
+    {"content": "The only place where success comes before work is in the dictionary.", "author": "Vidal Sassoon", "category": "work"},
+    {"content": "I find that the harder I work, the more luck I seem to have.", "author": "Thomas Jefferson", "category": "work"},
+    {"content": "Don't wish it were easier; wish you were better.", "author": "Jim Rohn", "category": "schedule"},
+    {"content": "Education is the passport to the future, for tomorrow belongs to those who prepare for it today.", "author": "Malcolm X", "category": "study"},
+    {"content": "It does not matter how slowly you go as long as you do not stop.", "author": "Confucius", "category": "study"},
+    {"content": "The key to success is to focus on goals, not obstacles.", "author": "Brian Tracy", "category": "schedule"},
+    {"content": "Excellence is not a destination; it is a continuous journey that never ends.", "author": "Brian Tracy", "category": "placement"},
+]
+
+async def _fetch_external_quote_api(tags: list = None):
+    """Fetch quote from external API (Quotable API or Zenquotes)."""
+    try:
+        # Try Quotable API first (free, no auth needed)
+        tags_str = ','.join(tags) if tags else ''
+        url = 'https://api.quotable.io/random'
+        if tags_str:
+            url += f'?tags={tags_str}'
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        'content': data.get('content', ''),
+                        'author': data.get('author', 'Unknown'),
+                        'source': 'quotable_api',
+                        'tags': data.get('tags', [])
+                    }
+    except Exception as e:
+        print(f"Quotable API failed: {e}")
+    
+    try:
+        # Fallback to Zenquotes API
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://zenquotes.io/api/random', timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and isinstance(data, list) and len(data) > 0:
+                        quote = data[0]
+                        return {
+                            'content': quote.get('q', ''),
+                            'author': quote.get('a', 'Unknown').replace(', type.inspiration', ''),
+                            'source': 'zenquotes_api'
+                        }
+    except Exception as e:
+        print(f"Zenquotes API failed: {e}")
+    
+    return None
+
+def _generate_contextual_quote_with_ai(module: str = None, task_data: dict = None):
+    """Generate AI-based contextual quote using embeddings."""
+    try:
+        if not model:
+            return None
+        
+        # Map module to key phrases
+        module_prompts = {
+            'schedule': 'productivity and time management',
+            'study': 'learning and educational growth',
+            'insights': 'personal growth and success',
+            'placement': 'career development and professional excellence',
+            'general': 'motivation and personal development'
+        }
+        
+        prompt = module_prompts.get(module or 'general', 'motivation')
+        
+        # Get contextual text
+        context_text = prompt
+        if task_data:
+            title = task_data.get('title', '')
+            desc = task_data.get('description', '')
+            category = task_data.get('category', '')
+            context_text = f"{title} {desc} {category} {prompt}"
+        
+        # Use existing sentiment analysis to generate contextual quote
+        context_embedding = model.encode(context_text)
+        
+        # Match against static quotes to find most relevant
+        best_match = None
+        best_score = -1
+        
+        for quote in FALLBACK_QUOTES:
+            quote_embedding = model.encode(quote['content'])
+            
+            # Simple cosine similarity
+            score = sum(a*b for a, b in zip(context_embedding, quote_embedding))
+            score /= (sum(a*a for a in context_embedding) ** 0.5 * sum(b*b for b in quote_embedding) ** 0.5 + 1e-10)
+            
+            if score > best_score:
+                best_score = score
+                best_match = quote
+        
+        if best_match:
+            return {
+                **best_match,
+                'source': 'ai_contextual',
+                'relevance_score': round(float(best_score), 3)
+            }
+    except Exception as e:
+        print(f"AI quote generation failed: {e}")
+    
+    return None
+
 @app.get("/api/quote")
-async def get_quote():
-    """Return a random motivational quote."""
-    study_quotes = [
-        {"content": "The beautiful thing about learning is that no one can take it away from you.", "author": "B.B. King"},
-        {"content": "Live as if you were to die tomorrow. Learn as if you were to live forever.", "author": "Mahatma Gandhi"},
-        {"content": "The expert in anything was once a beginner.", "author": "Helen Hayes"},
-        {"content": "Success is the sum of small efforts, repeated day in and day out.", "author": "Robert Collier"},
-        {"content": "There are no shortcuts to any place worth going.", "author": "Beverly Sills"},
-        {"content": "The only place where success comes before work is in the dictionary.", "author": "Vidal Sassoon"},
-        {"content": "I find that the harder I work, the more luck I seem to have.", "author": "Thomas Jefferson"},
-        {"content": "Don't wish it were easier; wish you were better.", "author": "Jim Rohn"},
-        {"content": "Education is the passport to the future, for tomorrow belongs to those who prepare for it today.", "author": "Malcolm X"},
-        {"content": "It does not matter how slowly you go as long as you do not stop.", "author": "Confucius"}
-    ]
-    return random.choice(study_quotes)
+async def get_quote(module: str = None, use_ai: bool = False):
+    """
+    Return a motivational quote with multiple fallback strategies.
+    
+    Args:
+        module: 'schedule', 'study', 'insights', 'placement', or 'general'
+        use_ai: Force AI-based quote generation
+    
+    Fallback chain:
+    1. External API (Quotable/Zenquotes) - for unique quotes
+    2. AI-Generated contextual quote - personalized to module
+    3. Static fallback quotes - guaranteed to work
+    """
+    
+    print(f"📝 Quote endpoint called - module: {module}, use_ai: {use_ai}")
+    
+    # Ensure module is valid
+    if module not in QUOTE_CACHE_TAGS and module:
+        module = 'general'
+    
+    quote_result = None
+    
+    # Strategy 1: Try external API (unless explicitly using AI)
+    if not use_ai:
+        try:
+            tags = QUOTE_CACHE_TAGS.get(module or 'general', [])
+            external_quote = await _fetch_external_quote_api(tags)
+            if external_quote:
+                print(f"✅ Quote fetched from external API: {external_quote['source']}")
+                return {
+                    **external_quote,
+                    'module': module or 'general',
+                    'strategy': 'external_api'
+                }
+        except Exception as e:
+            print(f"External API strategy failed: {e}")
+    
+    # Strategy 2: AI-Generated contextual quote
+    try:
+        if use_ai or model:
+            ai_quote = _generate_contextual_quote_with_ai(module=module)
+            if ai_quote:
+                print(f"✅ Quote generated using AI")
+                return {
+                    **ai_quote,
+                    'module': module or 'general',
+                    'strategy': 'ai_contextual'
+                }
+    except Exception as e:
+        print(f"AI quote strategy failed: {e}")
+    
+    # Strategy 3: Fallback to static quotes (filtered by module)
+    try:
+        if module and module in QUOTE_CACHE_TAGS:
+            # Filter quotes by category
+            filtered_quotes = [q for q in FALLBACK_QUOTES if q.get('category') == module]
+            if not filtered_quotes:
+                filtered_quotes = FALLBACK_QUOTES
+        else:
+            filtered_quotes = FALLBACK_QUOTES
+        
+        selected_quote = random.choice(filtered_quotes)
+        print(f"✅ Quote selected from fallback list")
+        return {
+            'content': selected_quote['content'],
+            'author': selected_quote['author'],
+            'module': module or 'general',
+            'strategy': 'fallback_static',
+            'source': 'trackeneer_builtin'
+        }
+    except Exception as e:
+        print(f"Fallback strategy failed: {e}")
+        # Last resort - return a generic quote
+        return {
+            'content': "Success is the sum of small efforts, repeated day in and day out.",
+            'author': "Robert Collier",
+            'module': module or 'general',
+            'strategy': 'hardcoded_fallback',
+            'source': 'trackeneer_builtin'
+        }
 
 def _recommendations_for_topic(topic_detected: str):
     """Generate dynamic recommendations for a topic."""

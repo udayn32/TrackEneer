@@ -455,9 +455,9 @@ const SchedulePage = () => {
           </div>
           <nav className="space-y-3">
             {[
-              { label: "Projects", icon: "📁" },
-              { label: "Study", icon: "📚" },
-              { label: "Career", icon: "🎯" },
+              { label: "Study", icon: "📚",path:"/study" },
+              { label: "Placcement", icon: "🎯",path:"/placement" },
+              { label: "Insight", icon: "💡",path:"/insights" },
             ].map((item) => (
               <button key={item.label} className="w-full text-left px-4 py-3 rounded-lg text-slate-300 hover:bg-slate-700 hover:text-cyan-400 transition-all duration-200 font-medium text-sm">
                 <span className="mr-2">{item.icon}</span>{item.label}

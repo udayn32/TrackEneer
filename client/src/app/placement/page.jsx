@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 
-const API_BASE = 'http://localhost:5003';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://localhost:5000';
 
 export default function PlacementPage() {
   const { data: session } = useSession();

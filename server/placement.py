@@ -1,15 +1,16 @@
-"""
-Placement Module Backend - FastAPI endpoints for company research using Gemini AI
-"""
-import os
-from fastapi import FastAPI, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
+"""Placement module backed by Neo4j for caching Gemini AI company insights."""
+
 import json
-from pathlib import Path
-import google.generativeai as genai
-from typing import Optional
+import os
 import re
+from datetime import datetime
+from typing import Optional
+
+import google.generativeai as genai
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from db import get_driver
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
@@ -29,21 +30,68 @@ genai.configure(api_key=GEMINI_API_KEY)
 # Using Gemini 2.5 Flash - fast and efficient
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-COMPANIES_FILE = Path("companies.json")
 CACHE_DURATION = 24 * 60 * 60  # 24 hours in seconds
 
-# --- Data Models ---
-def load_companies():
-    """Load companies data from JSON file"""
-    if COMPANIES_FILE.exists():
-        with open(COMPANIES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
 
-def save_companies(companies):
-    """Save companies data to JSON file"""
-    with open(COMPANIES_FILE, "w", encoding="utf-8") as f:
-        json.dump(companies, f, indent=2, ensure_ascii=False)
+driver = get_driver()
+
+
+def _company_key(name: str) -> str:
+    return name.lower().strip()
+
+
+def _serialize_company(node) -> dict:
+    sections = json.loads(node.get("sections", "{}")) if node.get("sections") else {}
+    score_info = json.loads(node.get("scoreInfo", "{}")) if node.get("scoreInfo") else {}
+    return {
+        "success": True,
+        "company_name": node.get("companyName"),
+        "website": node.get("website"),
+        "sections": sections,
+        "raw_content": node.get("rawContent"),
+        "generated_at": node.get("generatedAt"),
+        "score_info": score_info,
+    }
+
+
+def _fetch_company(company_key: str) -> Optional[dict]:
+    with driver.session() as session:
+        record = session.run(
+            """
+            MATCH (c:Company {key: $key})
+            RETURN c
+            """,
+            key=company_key,
+        ).single()
+        if record:
+            return _serialize_company(record["c"])
+        return None
+
+
+def _store_company(company_key: str, data: dict) -> None:
+    sections_json = json.dumps(data.get("sections", {}), ensure_ascii=False)
+    score_info_json = json.dumps(data.get("score_info", {}), ensure_ascii=False)
+    with driver.session() as session:
+        session.run(
+            """
+            MERGE (c:Company {key: $key})
+            SET c += {
+                companyName: $company_name,
+                website: $website,
+                sections: $sections,
+                rawContent: $raw_content,
+                generatedAt: $generated_at,
+                scoreInfo: $score_info
+            }
+            """,
+            key=company_key,
+            company_name=data.get("company_name"),
+            website=data.get("website"),
+            sections=sections_json,
+            raw_content=data.get("raw_content"),
+            generated_at=data.get("generated_at"),
+            score_info=score_info_json,
+        )
 
 def is_cache_valid(timestamp: str) -> bool:
     """Check if cached data is still valid"""
@@ -221,15 +269,14 @@ async def generate_placement_info(
     """Generate placement information for a company using Gemini AI"""
     
     try:
-        companies = load_companies()
-        company_key = company_name.lower().strip()
-        
-        # Check cache
-        if company_key in companies and is_cache_valid(companies[company_key].get("generated_at", "")):
+        company_key = _company_key(company_name)
+
+        cached = _fetch_company(company_key)
+        if cached and is_cache_valid(cached.get("generated_at", "")):
             return {
                 "message": "Retrieved from cache",
                 "cached": True,
-                **companies[company_key]
+                **cached
             }
         
         # Generate new information
@@ -246,10 +293,8 @@ async def generate_placement_info(
         score_info = generate_company_score(company_name, company_info)
         company_info["score_info"] = score_info
         
-        # Cache the result
-        companies[company_key] = company_info
-        save_companies(companies)
-        
+        _store_company(company_key, company_info)
+
         return {
             "message": "Information generated successfully",
             "cached": False,
@@ -267,14 +312,12 @@ async def generate_placement_info(
 @app.get("/api/placement/company/{company_name}")
 def get_company_info(company_name: str):
     """Get cached company information"""
-    companies = load_companies()
-    company_key = company_name.lower().strip()
-    
-    if company_key not in companies:
+    company_key = _company_key(company_name)
+    company_info = _fetch_company(company_key)
+
+    if not company_info:
         raise HTTPException(status_code=404, detail="Company not found. Please generate information first.")
-    
-    company_info = companies[company_key]
-    
+
     return {
         "cached": True,
         "cache_valid": is_cache_valid(company_info.get("generated_at", "")),
@@ -284,31 +327,46 @@ def get_company_info(company_name: str):
 @app.get("/api/placement/companies")
 def list_companies():
     """List all cached companies"""
-    companies = load_companies()
-    
-    company_list = []
-    for key, info in companies.items():
-        company_list.append({
-            "company_name": info.get("company_name", key),
-            "website": info.get("website"),
-            "generated_at": info.get("generated_at"),
-            "cache_valid": is_cache_valid(info.get("generated_at", "")),
-            "score": info.get("score_info", {}).get("score", 0)
-        })
-    
-    return {"companies": company_list, "total": len(company_list)}
+    with driver.session() as session:
+        records = session.run(
+            """
+            MATCH (c:Company)
+            RETURN c
+            ORDER BY c.companyName
+            """
+        )
+        companies = []
+        for record in records:
+            node = record["c"]
+            info = _serialize_company(node)
+            companies.append({
+                "company_name": info.get("company_name") or node.get("key"),
+                "website": info.get("website"),
+                "generated_at": info.get("generated_at"),
+                "cache_valid": is_cache_valid(info.get("generated_at", "")),
+                "score": info.get("score_info", {}).get("score", 0),
+            })
+
+    return {"companies": companies, "total": len(companies)}
 
 @app.delete("/api/placement/company/{company_name}")
 def delete_company_cache(company_name: str):
     """Delete cached company information"""
-    companies = load_companies()
-    company_key = company_name.lower().strip()
-    
-    if company_key in companies:
-        del companies[company_key]
-        save_companies(companies)
+    company_key = _company_key(company_name)
+    with driver.session() as session:
+        deleted = session.run(
+            """
+            MATCH (c:Company {key: $key})
+            WITH c
+            DETACH DELETE c
+            RETURN count(c) AS removed
+            """,
+            key=company_key,
+        ).single()
+
+    if deleted["removed"]:
         return {"message": "Company cache deleted successfully"}
-    
+
     raise HTTPException(status_code=404, detail="Company not found")
 
 @app.get("/api/placement/alumni")

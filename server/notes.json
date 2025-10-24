@@ -20,5 +20,16 @@
     "fileType": "PDF",
     "fileSize": 3527324,
     "uploadedAt": "2025-10-21T16:30:21.658752"
+  },
+  {
+    "id": "042135fa-aa3e-469e-8490-c503e9dff2ab",
+    "subjectId": "f5096482-d3ff-4ef6-af81-9ce21c2d80ba",
+    "title": "Sample dummy document",
+    "description": "",
+    "filename": "Fake_News_Detection_System_Using_Logistic_Regressi.pdf",
+    "storedFilename": "042135fa-aa3e-469e-8490-c503e9dff2ab.pdf",
+    "fileType": "PDF",
+    "fileSize": 271204,
+    "uploadedAt": "2025-10-24T12:43:14.462005"
   }
 ]

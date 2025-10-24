@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 
-const API_BASE = 'http://localhost:5004';
+const API_BASE = 'http://localhost:5000';
 
 export default function InsightsPage() {
   const { data: session } = useSession();

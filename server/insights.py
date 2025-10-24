@@ -1,14 +1,15 @@
-"""
-Insights Module Backend - FastAPI endpoints for student guidance using Cohere AI
-"""
+"""Insights module backed by Neo4j for caching AI-generated guidance."""
+
 import os
-from fastapi import FastAPI, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
+import uuid
 from datetime import datetime
-import json
-from pathlib import Path
-import cohere
 from typing import Optional
+
+import cohere
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from db import get_driver
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
@@ -25,7 +26,6 @@ app.add_middleware(
 COHERE_API_KEY = "rM2zziYqveYXde5i74mQjLRSVU2NE22klhea4Xu1"
 co = cohere.Client(COHERE_API_KEY)
 
-INSIGHTS_FILE = Path("insights.json")
 CACHE_DURATION = 24 * 60 * 60  # 24 hours in seconds
 
 # Year mappings
@@ -46,19 +46,6 @@ BRANCHES = {
     "Electrical": "Electrical Engineering"
 }
 
-# --- Data Models ---
-def load_insights():
-    """Load insights data from JSON file"""
-    if INSIGHTS_FILE.exists():
-        with open(INSIGHTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_insights(insights):
-    """Save insights data to JSON file"""
-    with open(INSIGHTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(insights, f, indent=2, ensure_ascii=False)
-
 def is_cache_valid(timestamp: str) -> bool:
     """Check if cached data is still valid"""
     try:
@@ -67,6 +54,94 @@ def is_cache_valid(timestamp: str) -> bool:
         return (current_time - cached_time).total_seconds() < CACHE_DURATION
     except:
         return False
+
+
+driver = get_driver()
+
+
+def _serialize_insight(node) -> dict:
+    return {
+        "success": bool(node.get("success", True)),
+        "year": node.get("year"),
+        "branch": node.get("branch"),
+        "year_full_name": node.get("yearFullName"),
+        "content": node.get("content"),
+        "generated_at": node.get("generatedAt"),
+    }
+
+
+def _fetch_cached_insight(year: str, branch: str) -> Optional[dict]:
+    with driver.session() as session:
+        record = session.run(
+            """
+            MATCH (i:Insight {year: $year, branch: $branch})
+            RETURN i
+            """,
+            year=year,
+            branch=branch,
+        ).single()
+        if record:
+            return _serialize_insight(record["i"])
+        return None
+
+
+def _store_insight(data: dict) -> None:
+    with driver.session() as session:
+        session.run(
+            """
+            MERGE (i:Insight {year: $year, branch: $branch})
+            SET i += {
+                id: $id,
+                yearFullName: $year_full_name,
+                content: $content,
+                generatedAt: $generated_at,
+                success: $success
+            }
+            """,
+            id=data.get("id") or str(uuid.uuid4()),
+            year=data.get("year"),
+            branch=data.get("branch"),
+            year_full_name=data.get("year_full_name"),
+            content=data.get("content"),
+            generated_at=data.get("generated_at"),
+            success=bool(data.get("success", True)),
+        )
+
+
+def _fetch_quick_tips(year: str) -> Optional[dict]:
+    with driver.session() as session:
+        record = session.run(
+            """
+            MATCH (t:InsightTip {year: $year})
+            RETURN t
+            """,
+            year=year,
+        ).single()
+        if record:
+            node = record["t"]
+            return {
+                "success": True,
+                "year": node.get("year"),
+                "tips": node.get("tips"),
+                "generated_at": node.get("generatedAt"),
+            }
+        return None
+
+
+def _store_quick_tips(year: str, tips: str) -> None:
+    with driver.session() as session:
+        session.run(
+            """
+            MERGE (t:InsightTip {year: $year})
+            SET t += {
+                tips: $tips,
+                generatedAt: $generated_at
+            }
+            """,
+            year=year,
+            tips=tips,
+            generated_at=datetime.now().isoformat(),
+        )
 
 # --- AI Generation Functions ---
 def generate_year_insights(year: str, branch: str = None) -> dict:
@@ -212,15 +287,13 @@ async def generate_insights(
         raise HTTPException(status_code=400, detail=f"Invalid year. Must be one of: {', '.join(YEAR_INFO.keys())}")
     
     try:
-        insights_data = load_insights()
-        cache_key = f"{year}_{branch or 'general'}"
-        
-        # Check cache
-        if cache_key in insights_data and is_cache_valid(insights_data[cache_key].get("generated_at", "")):
+        db_branch = branch or 'general'
+        cached = _fetch_cached_insight(year, db_branch)
+        if cached and is_cache_valid(cached.get("generated_at", "")):
             return {
                 "message": "Retrieved from cache",
                 "cached": True,
-                **insights_data[cache_key]
+                **cached
             }
         
         # Generate new insights
@@ -230,10 +303,10 @@ async def generate_insights(
         if not result["success"]:
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to generate insights"))
         
-        # Cache the result
-        insights_data[cache_key] = result
-        save_insights(insights_data)
-        
+        result["branch"] = db_branch
+        result["id"] = result.get("id") or str(uuid.uuid4())
+        _store_insight(result)
+
         return {
             "message": "Insights generated successfully",
             "cached": False,
@@ -255,12 +328,20 @@ def get_quick_tips(year: str):
     if year not in YEAR_INFO:
         raise HTTPException(status_code=400, detail=f"Invalid year. Must be one of: {', '.join(YEAR_INFO.keys())}")
     
+    cached = _fetch_quick_tips(year)
+    if cached and is_cache_valid(cached.get("generated_at", "")):
+        cached["cached"] = True
+        return cached
+
     try:
         result = generate_quick_tips(year)
         
         if not result["success"]:
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to generate tips"))
-        
+
+        tips_text = result.get("tips", "")
+        _store_quick_tips(year, tips_text)
+        result["cached"] = False
         return result
     
     except Exception as e:
@@ -297,14 +378,22 @@ def list_branches():
 @app.delete("/api/insights/cache/{year}")
 def clear_cache(year: str, branch: str = None):
     """Clear cached insights for a specific year/branch combination"""
-    insights_data = load_insights()
-    cache_key = f"{year}_{branch or 'general'}"
-    
-    if cache_key in insights_data:
-        del insights_data[cache_key]
-        save_insights(insights_data)
+    db_branch = branch or 'general'
+    with driver.session() as session:
+        deleted = session.run(
+            """
+            MATCH (i:Insight {year: $year, branch: $branch})
+            WITH i
+            DETACH DELETE i
+            RETURN count(i) AS removed
+            """,
+            year=year,
+            branch=db_branch,
+        ).single()
+
+    if deleted["removed"]:
         return {"message": "Cache cleared successfully"}
-    
+
     raise HTTPException(status_code=404, detail="No cached data found")
 
 if __name__ == "__main__":

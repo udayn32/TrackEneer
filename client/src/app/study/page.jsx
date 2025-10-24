@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 
-const API_BASE = process.env.NEXT_PUBLIC_STUDY_API || "http://localhost:5002";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:5000";
 
 export default function StudyPage() {
   const { data: session } = useSession();

@@ -6,6 +6,8 @@ import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://localhost:5000';
+
 export default function RegisterPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -17,28 +19,36 @@ export default function RegisterPage() {
     e.preventDefault();
     setError('');
 
-    // Call your Flask backend's register endpoint
-    const res = await fetch('http://127.0.0.1:5000/api/auth/register', { // Your Flask API URL
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password }),
-    });
-
-    if (res.ok) {
-      // If registration is successful, sign the user in automatically
-      const signInRes = await signIn('credentials', {
-        redirect: false,
-        email,
-        password,
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password }),
       });
-      if (signInRes.ok) {
-        router.push('/dashboard');
+
+      if (res.ok) {
+        const signInRes = await signIn('credentials', {
+          redirect: false,
+          email,
+          password,
+        });
+        if (signInRes?.ok) {
+          router.push('/dashboard');
+        } else if (signInRes?.error) {
+          setError(signInRes.error);
+        }
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data?.detail || data?.message || 'Registration failed.');
       }
-    } else {
-      // Handle errors (e.g., email already exists)
-      const data = await res.json();
-      setError(data.message || 'Registration failed.');
+    } catch (err) {
+      setError('Unable to reach the server. Please try again.');
     }
+  };
+
+  const handleOAuth = async (provider) => {
+    setError('');
+    await signIn(provider, { callbackUrl: '/dashboard' });
   };
 
   return (
@@ -54,6 +64,30 @@ export default function RegisterPage() {
         </div>
 
         {error && <p className="text-center text-red-400 bg-red-500/10 p-2 rounded-md">{error}</p>}
+
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => handleOAuth('google')}
+            className="w-full flex items-center justify-center gap-2 font-semibold py-3 px-4 bg-white text-slate-900 rounded-lg border border-slate-200 hover:bg-slate-100 transition-colors"
+          >
+            <span role="img" aria-label="Google">🔍</span>
+            Continue with Google
+          </button>
+          <button
+            type="button"
+            onClick={() => handleOAuth('github')}
+            className="w-full flex items-center justify-center gap-2 font-semibold py-3 px-4 bg-slate-900 text-slate-100 rounded-lg border border-slate-600 hover:bg-slate-800 transition-colors"
+          >
+            <span role="img" aria-label="GitHub">🐙</span>
+            Continue with GitHub
+          </button>
+        </div>
+
+        <div className="relative py-2 text-center">
+          <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-700" aria-hidden="true" />
+          <span className="relative bg-slate-800/50 px-3 text-xs uppercase tracking-widest text-slate-400">or create with email</span>
+        </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

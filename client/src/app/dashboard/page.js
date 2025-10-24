@@ -5,9 +5,64 @@ import { useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
 
+// Fallback quotes for when API is unavailable
+const FALLBACK_QUOTES = [
+  { content: "The beautiful thing about learning is that no one can take it away from you.", author: "B.B. King" },
+  { content: "Success is the sum of small efforts, repeated day in and day out.", author: "Robert Collier" },
+  { content: "The only way to do great work is to love what you do.", author: "Steve Jobs" },
+  { content: "Believe you can and you're halfway there.", author: "Theodore Roosevelt" },
+  { content: "The expert in anything was once a beginner.", author: "Helen Hayes" },
+  { content: "Don't wish it were easier; wish you were better.", author: "Jim Rohn" },
+  { content: "Small daily improvements over time lead to stunning results.", author: "Robin Sharma" },
+  { content: "The best time to plant a tree was 20 years ago. The second best time is now.", author: "Chinese Proverb" },
+  { content: "Discipline is the bridge between goals and accomplishment.", author: "Jim Rohn" },
+  { content: "Everything you've ever wanted is on the other side of fear.", author: "George Addair" },
+];
+
 // Header Component
 const Header = () => {
   const { data: session } = useSession();
+  const [quote, setQuote] = useState(FALLBACK_QUOTES[0]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const saved = sessionStorage.getItem('dashboardQuote');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed?.content) {
+          setQuote(parsed);
+          return;
+        }
+      } catch (err) {
+        // ignore malformed storage; fall through to fetch
+      }
+    }
+
+    const fetchQuote = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/quote`);
+        if (!response.ok) throw new Error("Failed to fetch quote");
+        const data = await response.json();
+
+        const newQuote = {
+          content: data.content || data.quote || data.text,
+          author: data.author || "Unknown",
+        };
+
+        setQuote(newQuote);
+        sessionStorage.setItem('dashboardQuote', JSON.stringify(newQuote));
+      } catch (err) {
+        console.error("Error fetching quote:", err);
+        const fallbackQuote = FALLBACK_QUOTES[Math.floor(Math.random() * FALLBACK_QUOTES.length)];
+        setQuote(fallbackQuote);
+        sessionStorage.setItem('dashboardQuote', JSON.stringify(fallbackQuote));
+      }
+    };
+
+    fetchQuote();
+  }, []);
   
   return (
     <header className="bg-gradient-to-r from-cyan-500 via-blue-500 to-purple-500 text-white p-6 rounded-xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl shadow-cyan-500/20">
@@ -20,8 +75,11 @@ const Header = () => {
       {/* Middle: Quote */}
       <div className="text-center flex-1">
         <p className="text-xl md:text-2xl italic font-serif">
-          Push harder than yesterday, if you want a different tomorrow
+          "{quote.content}"
         </p>
+        {quote.author && (
+          <p className="text-sm mt-2 text-white/80 font-medium">— {quote.author}</p>
+        )}
       </div>
 
       {/* Right side: Avatar and Logout */}
