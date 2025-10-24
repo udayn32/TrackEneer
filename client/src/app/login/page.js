@@ -82,10 +82,10 @@ export default function LoginPage() {
         </div>
 
         <div className="flex gap-4">
-          <button onClick={() => signIn('google', { callbackUrl: '/dashboard' })} className="w-full flex items-center justify-center gap-3 bg-slate-700 hover:bg-slate-600 font-semibold py-3 px-4 rounded-lg transition-colors">
+          <button onClick={() => signIn('google', { callbackUrl: '/oauth-register' })} className="w-full flex items-center justify-center gap-3 bg-slate-700 hover:bg-slate-600 font-semibold py-3 px-4 rounded-lg transition-colors">
             <FaGoogle /> Google
           </button>
-          <button onClick={() => signIn('github', { callbackUrl: '/dashboard' })} className="w-full flex items-center justify-center gap-3 bg-slate-700 hover:bg-slate-600 font-semibold py-3 px-4 rounded-lg transition-colors">
+          <button onClick={() => signIn('github', { callbackUrl: '/oauth-register' })} className="w-full flex items-center justify-center gap-3 bg-slate-700 hover:bg-slate-600 font-semibold py-3 px-4 rounded-lg transition-colors">
             <FaGithub /> GitHub
           </button>
         </div>

@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { signIn } from 'next-auth/react';
+import { useState, useEffect } from 'react';
+import { useSession, signIn } from 'next-auth/react';
 import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -11,18 +11,14 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') ||
   'http://localhost:5000';
 
-export default function RegisterPage() {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [fieldErrors, setFieldErrors] = useState({});
+export default function OAuthRegisterPage() {
+  const { data: session, status } = useSession();
   const router = useRouter();
 
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [careerGoal, setCareerGoal] = useState('');
   const [careerOther, setCareerOther] = useState('');
-  const [branch, setBranch] = useState('');
-  const [year, setYear] = useState('');
   const [weaknesses, setWeaknesses] = useState([]);
   const [weaknessesOther, setWeaknessesOther] = useState('');
   const [challenges, setChallenges] = useState([]);
@@ -30,34 +26,91 @@ export default function RegisterPage() {
   const [helpOptions, setHelpOptions] = useState([]);
   const [helpOther, setHelpOther] = useState('');
   const [resumeFile, setResumeFile] = useState(null);
+  const [branch, setBranch] = useState('');
+  const [year, setYear] = useState('');
+  const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (session?.user) {
+      setName(session.user.name || '');
+      setEmail(session.user.email || '');
+    }
+  }, [session]);
+
+  // If the OAuth session exists and the user is already registered in our DB,
+  // automatically create the server-side session (via oauth-register) and
+  // redirect to dashboard. This avoids showing the onboarding form to users
+  // who already completed onboarding previously.
+  useEffect(() => {
+    let mounted = true;
+    const tryAutoLogin = async () => {
+      if (!session?.user || !session.user.email) return;
+      try {
+        const check = await fetch(`${API_BASE}/api/auth/exists?email=${encodeURIComponent(session.user.email)}`);
+        if (!mounted) return;
+        if (check.ok) {
+          const data = await check.json();
+          if (data?.exists) {
+            // user exists in DB — perform minimal oauth-register POST to create server session
+            const form = new FormData();
+            form.append('name', session.user.name || '');
+            form.append('email', session.user.email || '');
+            form.append('branch', branch || '');
+            form.append('year', year || '');
+            form.append('career_goal', '');
+
+            const res = await fetch(`${API_BASE}/api/auth/oauth-register`, {
+              method: 'POST',
+              body: form,
+              credentials: 'include',
+            });
+            if (res.ok) {
+              router.push('/dashboard');
+            } else {
+              // Log and surface server validation errors (422) so it's easier to debug
+              let txt = '';
+              try {
+                const j = await res.json();
+                txt = JSON.stringify(j);
+                setError(j?.detail || j?.message || 'OAuth login failed');
+              } catch (e) {
+                txt = await res.text().catch(() => String(res.status));
+                setError('OAuth login failed');
+              }
+              console.error('oauth-register failed', res.status, txt);
+            }
+          }
+        }
+      } catch (e) {
+        // ignore network errors — user can still fill the form manually
+      }
+    };
+
+    tryAutoLogin();
+    return () => {
+      mounted = false;
+    };
+  }, [session]);
+
+  // helper to toggle values in an array (for checkbox groups)
+  const toggleArray = (arrSetter, arr, value) => {
+    if (arr.includes(value)) {
+      arrSetter(arr.filter((x) => x !== value));
+    } else {
+      arrSetter([...arr, value]);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setSubmitting(true);
     try {
-      // Quick server-side existence check to avoid duplicate registrations
-      if (email) {
-        try {
-          const chk = await fetch(`${API_BASE}/api/auth/exists?email=${encodeURIComponent(email)}`);
-          if (chk.ok) {
-            const j = await chk.json();
-            if (j?.exists) {
-              setError('An account with this email already exists. Please sign in or use OAuth.');
-              return;
-            }
-          }
-        } catch (err) {
-          // ignore network error here; proceed to attempt registration which will surface server errors
-        }
-      }
-
-    
       const form = new FormData();
       form.append('name', name);
       form.append('email', email);
-      form.append('password', password);
-  // Normalize fields: send arrays as JSON strings, include 'Other' text when provided
-  // required fields expected by backend
   form.append('branch', branch || '');
   form.append('year', year || '');
   const chosenCareer = careerGoal === 'Other' ? careerOther : careerGoal;
@@ -67,27 +120,17 @@ export default function RegisterPage() {
   form.append('wants_help', JSON.stringify(helpOptions.concat(helpOther ? [helpOther] : [])));
       if (resumeFile) form.append('resume', resumeFile);
 
-      const res = await fetch(`${API_BASE}/api/auth/register`, {
+      const res = await fetch(`${API_BASE}/api/auth/oauth-register`, {
         method: 'POST',
         body: form,
       });
 
       if (res.ok) {
-        // Attempt to sign in using credentials after registration
+        // Redirect to dashboard
         setFieldErrors({});
-        const signInRes = await signIn('credentials', {
-          redirect: false,
-          email,
-          password,
-        });
-        if (signInRes?.ok) {
-          router.push('/dashboard');
-        } else if (signInRes?.error) {
-          setError(signInRes.error);
-        }
+        router.push('/dashboard');
       } else {
         const data = await res.json().catch(() => null);
-        // FastAPI validation errors often come as an array of {loc,msg,type}
         if (Array.isArray(data)) {
           const map = {};
           data.forEach((err) => {
@@ -112,73 +155,40 @@ export default function RegisterPage() {
       }
     } catch (err) {
       setError('Unable to reach the server. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  // helpers for checkbox groups
-  const toggleArray = (arrSetter, arr, value) => {
-    if (arr.includes(value)) {
-      arrSetter(arr.filter((x) => x !== value));
-    } else {
-      arrSetter([...arr, value]);
-    }
-  };
-
-  const handleOAuth = async (provider) => {
-    setError('');
-    // Redirect to oauth-register so the user can complete profile & upload resume after provider auth
-    await signIn(provider, { callbackUrl: '/oauth-register' });
-  };
+  if (status === 'loading') {
+    return <div className="min-h-screen flex items-center justify-center">Loading…</div>;
+  }
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-200 flex items-center justify-center p-4">
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
-  className="w-full max-w-md p-8 space-y-6 bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl shadow-2xl"
+        className="w-full max-w-md p-8 space-y-6 bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl shadow-2xl"
       >
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-cyan-400">Create Your Account</h1>
-          <p className="mt-2 text-slate-400">Join TrackEneer to get started</p>
+          <h1 className="text-3xl font-bold text-cyan-400">Complete Your Profile</h1>
+          <p className="mt-2 text-slate-400">Finish your TrackEneer profile to get tailored recommendations</p>
         </div>
 
         {error && (
           <p className="text-center text-red-400 bg-red-500/10 p-2 rounded-md">
-            {typeof error === 'string' ? error
+            {typeof error === 'string'
+              ? error
               : Array.isArray(error)
               ? error.map((it) => (typeof it === 'string' ? it : JSON.stringify(it))).join('; ')
               : typeof error === 'object'
-              ? // pydantic-style validation errors often come as array-like under 'detail' or as an array itself
-                (error.detail
+              ? (error.detail
                   ? (typeof error.detail === 'string' ? error.detail : Array.isArray(error.detail) ? error.detail.map((d) => d.msg || JSON.stringify(d)).join('; ') : JSON.stringify(error.detail))
                   : error.message || JSON.stringify(error))
               : String(error)}
           </p>
         )}
-
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={() => handleOAuth('google')}
-            className="w-full flex items-center justify-center gap-2 font-semibold py-3 px-4 bg-white text-slate-900 rounded-lg border border-slate-200 hover:bg-slate-100 transition-colors"
-          >
-            <span role="img" aria-label="Google">🔍</span>
-            Continue with Google
-          </button>
-          <button
-            type="button"
-            onClick={() => handleOAuth('github')}
-            className="w-full flex items-center justify-center gap-2 font-semibold py-3 px-4 bg-slate-900 text-slate-100 rounded-lg border border-slate-600 hover:bg-slate-800 transition-colors"
-          >
-            <span role="img" aria-label="GitHub">🐙</span>
-            Continue with GitHub
-          </button>
-        </div>
-
-        <div className="relative py-2 text-center">
-          <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-700" aria-hidden="true" />
-          <span className="relative bg-slate-800/50 px-3 text-xs uppercase tracking-widest text-slate-400">or create with email</span>
-        </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -192,6 +202,7 @@ export default function RegisterPage() {
             />
             {fieldErrors.name && <p className="text-xs text-red-400 mt-1">{fieldErrors.name}</p>}
           </div>
+
           <div>
             <label className="text-sm font-medium text-slate-300">Branch</label>
             <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="e.g. CSE" className="w-full mt-1 p-3 bg-slate-900 rounded-md border border-slate-700" />
@@ -202,6 +213,7 @@ export default function RegisterPage() {
             <input value={year} onChange={(e) => setYear(e.target.value)} placeholder="e.g. 3rd" className="w-full mt-1 p-3 bg-slate-900 rounded-md border border-slate-700" />
             {fieldErrors.year && <p className="text-xs text-red-400 mt-1">{fieldErrors.year}</p>}
           </div>
+
           <div>
             <label className="text-sm font-medium text-slate-300">Email</label>
             <input
@@ -211,17 +223,7 @@ export default function RegisterPage() {
               required
               className="w-full mt-1 p-3 bg-slate-900 rounded-md border border-slate-700 focus:outline-none focus:ring-2 focus:ring-cyan-500"
             />
-          </div>
-          <div>
-            <label className="text-sm font-medium text-slate-300">Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full mt-1 p-3 bg-slate-900 rounded-md border border-slate-700 focus:outline-none focus:ring-2 focus:ring-cyan-500"
-            />
-            {fieldErrors.password && <p className="text-xs text-red-400 mt-1">{fieldErrors.password}</p>}
+            {fieldErrors.email && <p className="text-xs text-red-400 mt-1">{fieldErrors.email}</p>}
           </div>
 
           <div>
@@ -250,9 +252,9 @@ export default function RegisterPage() {
           </div>
 
           <div>
-            <label className="text-sm font-medium text-slate-300">What Help do you want?</label>
+            <label className="text-sm font-medium text-slate-300">Weaknesses (choose any)</label>
             <div className="grid grid-cols-2 gap-2 mt-2">
-              {['Time management','Consistency / focus','Technical depth','Communication skills'].map((w) => (
+              {['Time management','Public speaking','Consistency / focus','Handling pressure or failure','Technical depth','Confidence in interviews','Communication skills','Networking'].map((w) => (
                 <label key={w} className="inline-flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={weaknesses.includes(w)} onChange={() => toggleArray(setWeaknesses, weaknesses, w)} className="w-4 h-4" />
                   <span className="text-slate-300">{w}</span>
@@ -264,7 +266,7 @@ export default function RegisterPage() {
           </div>
 
           <div>
-            <label className="text-sm font-medium text-slate-300">What are the Challenges you face?</label>
+            <label className="text-sm font-medium text-slate-300">Challenges (choose any)</label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
               {['Lack of proper guidance or mentorship','Difficulty finding good learning resources','Balancing academics and projects','Financial or technical limitations','Self-doubt or motivation issues','Team collaboration challenges'].map((c) => (
                 <label key={c} className="inline-flex items-center gap-2 text-sm">
@@ -296,17 +298,14 @@ export default function RegisterPage() {
             <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setResumeFile(e.target.files?.[0] || null)} className="w-full mt-1 text-sm text-slate-300" />
             {fieldErrors.resume && <p className="text-xs text-red-400 mt-1">{fieldErrors.resume}</p>}
           </div>
-          <button type="submit" className="w-full font-bold py-3 px-4 bg-cyan-500 hover:bg-cyan-400 text-slate-900 rounded-lg transition-colors">
-            Create Account
-          </button>
-        </form>
 
-        <p className="text-center text-sm text-slate-400">
-          Already have an account?{' '}
-          <Link href="/login" className="font-medium text-cyan-400 hover:underline">
-            Sign In
-          </Link>
-        </p>
+          <div className="flex justify-between items-center">
+            <Link href="/dashboard" className="text-sm text-slate-400 hover:underline">Skip for now</Link>
+            <button type="submit" disabled={submitting} className="font-bold py-2 px-4 bg-cyan-500 hover:bg-cyan-400 text-slate-900 rounded-lg transition-colors">
+              {submitting ? 'Saving…' : 'Save & Continue'}
+            </button>
+          </div>
+        </form>
       </motion.div>
     </div>
   );
