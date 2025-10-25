@@ -1439,10 +1439,10 @@ async def api_login(request: Request, response: Response):
 
             user = rec['u']
             user_obj = {k: neo4j_to_serializable(v) for k,v in dict(user).items()} if hasattr(user, 'items') else dict(user)
-<<<<<<< HEAD
+ 
             touch_user_login(session, email=email, name=user_obj.get('name'))
             ensure_user_and_day(session, email=email, name=user_obj.get('name'))
-=======
+
             # Create a server-side session token stored in Mongo and set an HttpOnly cookie
             try:
                 db = get_mongo_db()
@@ -1461,7 +1461,7 @@ async def api_login(request: Request, response: Response):
             except Exception as e:
                 print(f"Warning: could not create server session: {e}")
 
->>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
+
             return {
                 'id': user_obj.get('id'),
                 'name': user_obj.get('name'),
@@ -1477,11 +1477,11 @@ async def api_login(request: Request, response: Response):
 async def api_me(request: Request):
     """Return current user info."""
     try:
-<<<<<<< HEAD
+
         email_candidate = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
         payload = {'email': email_candidate} if email_candidate else None
         user_email = _resolve_user_email(request, payload)
-=======
+
         # Prefer session cookie for authentication, fall back to header
         cookie_token = request.cookies.get('trackeneer_session')
         email_hdr = None
@@ -1509,7 +1509,7 @@ async def api_me(request: Request):
 
         if not email_hdr:
             email_hdr = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
->>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
+
         with driver.session() as session:
             ensure_user_and_day(session, user_email)
             rec = session.run("MATCH (u:User {email: $email}) RETURN u", email=user_email).single()
@@ -1562,20 +1562,6 @@ async def api_signup(request: Request):
             users = db.users
             if users.find_one({'email': email}):
                 raise HTTPException(status_code=409, detail='User already exists')
-<<<<<<< HEAD
-            session.run("""
-                CREATE (u:User {
-                    id: $id, 
-                    name: $name, 
-                    email: $email, 
-                    password: $password, 
-                    createdAt: datetime()
-                })
-            """, id=user_id, name=name, email=email, password=password)
-            touch_user_login(session, email=email, name=name)
-            ensure_user_and_day(session, email=email, name=name)
-=======
->>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
 
             # simple sha256 hashing (replace with bcrypt for production)
             pwd_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
