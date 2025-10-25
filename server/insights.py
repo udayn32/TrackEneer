@@ -6,10 +6,11 @@ from datetime import datetime
 from typing import Optional
 
 import cohere
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import get_driver
+from graph_helpers import ensure_user_and_day, normalize_day
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
@@ -58,6 +59,17 @@ def is_cache_valid(timestamp: str) -> bool:
 
 driver = get_driver()
 
+DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "demo@trackeneer.local")
+
+
+def _resolve_user_email(request: Request, provided: Optional[str] = None) -> str:
+    email = provided or request.headers.get("x-user-email") or request.headers.get("X-User-Email")
+    if not email:
+        email = DEFAULT_USER_EMAIL
+    if not email:
+        raise HTTPException(status_code=400, detail="User email is required")
+    return email.strip().lower()
+
 
 def _serialize_insight(node) -> dict:
     return {
@@ -67,35 +79,44 @@ def _serialize_insight(node) -> dict:
         "year_full_name": node.get("yearFullName"),
         "content": node.get("content"),
         "generated_at": node.get("generatedAt"),
+        "dayDate": node.get("dayDate"),
+        "ownerEmail": node.get("ownerEmail"),
     }
 
 
-def _fetch_cached_insight(year: str, branch: str) -> Optional[dict]:
+def _fetch_cached_insight(year: str, branch: str, email: str, day: str) -> Optional[dict]:
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         record = session.run(
             """
-            MATCH (i:Insight {year: $year, branch: $branch})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_INSIGHT]->(i:Insight {year: $year, branch: $branch})
             RETURN i
             """,
             year=year,
             branch=branch,
+            email=email,
+            day=day_iso,
         ).single()
         if record:
             return _serialize_insight(record["i"])
         return None
 
 
-def _store_insight(data: dict) -> None:
+def _store_insight(data: dict, email: str, day: str) -> None:
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         session.run(
             """
-            MERGE (i:Insight {year: $year, branch: $branch})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})
+            MERGE (d)-[:HAS_INSIGHT]->(i:Insight {year: $year, branch: $branch})
             SET i += {
                 id: $id,
                 yearFullName: $year_full_name,
                 content: $content,
                 generatedAt: $generated_at,
-                success: $success
+                success: $success,
+                ownerEmail: $email,
+                dayDate: $day
             }
             """,
             id=data.get("id") or str(uuid.uuid4()),
@@ -105,17 +126,22 @@ def _store_insight(data: dict) -> None:
             content=data.get("content"),
             generated_at=data.get("generated_at"),
             success=bool(data.get("success", True)),
+            email=email,
+            day=day_iso,
         )
 
 
-def _fetch_quick_tips(year: str) -> Optional[dict]:
+def _fetch_quick_tips(year: str, email: str, day: str) -> Optional[dict]:
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         record = session.run(
             """
-            MATCH (t:InsightTip {year: $year})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_QUICK_TIP]->(t:InsightTip {year: $year})
             RETURN t
             """,
             year=year,
+            email=email,
+            day=day_iso,
         ).single()
         if record:
             node = record["t"]
@@ -124,23 +150,31 @@ def _fetch_quick_tips(year: str) -> Optional[dict]:
                 "year": node.get("year"),
                 "tips": node.get("tips"),
                 "generated_at": node.get("generatedAt"),
+                "dayDate": node.get("dayDate"),
+                "ownerEmail": node.get("ownerEmail"),
             }
         return None
 
 
-def _store_quick_tips(year: str, tips: str) -> None:
+def _store_quick_tips(year: str, tips: str, email: str, day: str) -> None:
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         session.run(
             """
-            MERGE (t:InsightTip {year: $year})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})
+            MERGE (d)-[:HAS_QUICK_TIP]->(t:InsightTip {year: $year})
             SET t += {
                 tips: $tips,
-                generatedAt: $generated_at
+                generatedAt: $generated_at,
+                ownerEmail: $email,
+                dayDate: $day
             }
             """,
             year=year,
             tips=tips,
             generated_at=datetime.now().isoformat(),
+            email=email,
+            day=day_iso,
         )
 
 # --- AI Generation Functions ---
@@ -277,8 +311,11 @@ def root():
 
 @app.post("/api/insights/generate")
 async def generate_insights(
+    request: Request,
     year: str = Form(...),
-    branch: str = Form(None)
+    branch: str = Form(None),
+    day: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
 ):
     """Generate personalized insights for a student"""
     
@@ -287,8 +324,10 @@ async def generate_insights(
         raise HTTPException(status_code=400, detail=f"Invalid year. Must be one of: {', '.join(YEAR_INFO.keys())}")
     
     try:
+        user_email = _resolve_user_email(request, email)
+        day_iso = normalize_day(day)
         db_branch = branch or 'general'
-        cached = _fetch_cached_insight(year, db_branch)
+        cached = _fetch_cached_insight(year, db_branch, user_email, day_iso)
         if cached and is_cache_valid(cached.get("generated_at", "")):
             return {
                 "message": "Retrieved from cache",
@@ -305,11 +344,13 @@ async def generate_insights(
         
         result["branch"] = db_branch
         result["id"] = result.get("id") or str(uuid.uuid4())
-        _store_insight(result)
+        _store_insight(result, user_email, day_iso)
 
         return {
             "message": "Insights generated successfully",
             "cached": False,
+            "dayDate": day_iso,
+            "ownerEmail": user_email,
             **result
         }
     
@@ -322,13 +363,16 @@ async def generate_insights(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/insights/quick-tips/{year}")
-def get_quick_tips(year: str):
+def get_quick_tips(year: str, request: Request, day: Optional[str] = None, email: Optional[str] = None):
     """Get quick tips for a specific year"""
     
     if year not in YEAR_INFO:
         raise HTTPException(status_code=400, detail=f"Invalid year. Must be one of: {', '.join(YEAR_INFO.keys())}")
     
-    cached = _fetch_quick_tips(year)
+    user_email = _resolve_user_email(request, email)
+    day_iso = normalize_day(day)
+
+    cached = _fetch_quick_tips(year, user_email, day_iso)
     if cached and is_cache_valid(cached.get("generated_at", "")):
         cached["cached"] = True
         return cached
@@ -340,8 +384,10 @@ def get_quick_tips(year: str):
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to generate tips"))
 
         tips_text = result.get("tips", "")
-        _store_quick_tips(year, tips_text)
+        _store_quick_tips(year, tips_text, user_email, day_iso)
         result["cached"] = False
+        result["dayDate"] = day_iso
+        result["ownerEmail"] = user_email
         return result
     
     except Exception as e:
@@ -376,19 +422,30 @@ def list_branches():
     }
 
 @app.delete("/api/insights/cache/{year}")
-def clear_cache(year: str, branch: str = None):
+def clear_cache(
+    year: str,
+    request: Request,
+    branch: str = None,
+    day: Optional[str] = None,
+    email: Optional[str] = None,
+):
     """Clear cached insights for a specific year/branch combination"""
     db_branch = branch or 'general'
+    user_email = _resolve_user_email(request, email)
+    day_iso = normalize_day(day)
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, user_email, day=day_iso)
         deleted = session.run(
             """
-            MATCH (i:Insight {year: $year, branch: $branch})
-            WITH i
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_INSIGHT]->(i:Insight {year: $year, branch: $branch})
+            WITH i, d
             DETACH DELETE i
             RETURN count(i) AS removed
             """,
             year=year,
             branch=db_branch,
+            email=user_email,
+            day=day_iso,
         ).single()
 
     if deleted["removed"]:

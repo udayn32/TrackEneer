@@ -73,6 +73,7 @@ import json
 import smtplib
 from email.message import EmailMessage
 import uvicorn
+from typing import Optional
 
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
@@ -119,9 +120,25 @@ def _parse_iso_to_dt(val):
 
 # --- 2. Database & AI Model Setup ---
 from db import get_driver
+from graph_helpers import ensure_user_and_day, normalize_day, touch_user_login
 
 driver = get_driver()
 print("Neo4j connection successful.")
+
+DEFAULT_USER_EMAIL = os.getenv('DEFAULT_USER_EMAIL', 'demo@trackeneer.local')
+
+
+def _resolve_user_email(request: Request, payload: Optional[dict] = None) -> str:
+    """Resolve the user email from payload or headers, applying defaults."""
+    email = None
+    if payload:
+        email = payload.get('userEmail') or payload.get('email')
+    email = email or request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+    if not email:
+        email = DEFAULT_USER_EMAIL
+    if not email:
+        raise HTTPException(status_code=400, detail='User email is required')
+    return email.strip().lower()
 
 print("Initializing AI model configuration...")
 
@@ -414,6 +431,11 @@ async def add_task(request: Request):
 
         ai_analysis = auto_schedule_task(data)
 
+        user_email = _resolve_user_email(request, data)
+        user_name = data.get('userName')
+        task_local_date = start_dt_ist.date() if start_dt_ist else datetime.now(IST).date()
+        task_day_iso = task_local_date.isoformat()
+
         # Handle due date
         provided_due = data.get('dueDate')
         due_datetime_to_store = None
@@ -436,8 +458,9 @@ async def add_task(request: Request):
                 due_datetime_to_store = start_dt_ist + timedelta(hours=1)
 
         with driver.session() as session:
+            ensure_user_and_day(session, user_email, day=task_day_iso, name=user_name)
             session.run("""
-                MERGE (d:Day {date: date($task_date)})
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($task_date), email: $email})
                 CREATE (t:Task {
                     id: $id, title: $title, description: $description, 
                     startTime: datetime($start_time), endTime: datetime($end_time), 
@@ -445,17 +468,19 @@ async def add_task(request: Request):
                     dueDate: CASE WHEN $due_date IS NOT NULL THEN datetime($due_date) ELSE null END, 
                     createdAt: datetime(), priority: $priority, category: $category, 
                     estimatedDuration: $estimated_duration, aiEnhanced: $ai_enhanced,
-                    timezone: 'IST'
+                    timezone: 'IST', ownerEmail: $email, ownerName: coalesce($user_name, $email), dayDate: $task_date
                 })
                 MERGE (d)-[:HAS_TASK]->(t)
             """,
-                task_date=start_dt_ist.date() if start_dt_ist else datetime.now(IST).date(), 
+                task_date=task_day_iso,
                 id=task_id, 
                 title=data['title'],
                 description=data['description'], 
                 start_time=start_dt_ist, 
                 end_time=end_dt_ist, 
                 due_date=due_datetime_to_store,
+                email=user_email,
+                user_name=user_name,
                 **ai_analysis)
 
         # Add embedding to vector DB
@@ -496,27 +521,37 @@ async def add_task(request: Request):
         raise HTTPException(status_code=500, detail="An internal error occurred while adding the task.")
 
 @app.get("/api/schedule")
-async def get_schedule(date: str):
+async def get_schedule(date: str, request: Request, email: Optional[str] = None):
     try:
-        query_date = datetime.strptime(date, '%Y-%m-%d').date()
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        query_date = normalize_day(date)
         with driver.session() as session:
+            ensure_user_and_day(session, user_email, day=query_date)
             result = session.run("""
-                MATCH (:Day {date: date($d)})-[:HAS_TASK]->(t:Task) 
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($d), email: $email})-[:HAS_TASK]->(t:Task)
                 RETURN t 
                 ORDER BY t.startTime
-            """, d=query_date)
+            """, d=query_date, email=user_email)
             tasks = [neo4j_to_serializable(record['t']) for record in result]
-        return {"date": date, "tasks": tasks}
+        return {"date": query_date, "tasks": tasks}
     except Exception as e:
         print(f"Error in get_schedule: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve schedule.")
 
 @app.get("/api/upcoming-deadlines")
-async def get_upcoming_deadlines():
+async def get_upcoming_deadlines(request: Request, email: Optional[str] = None):
     try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
         today = datetime.utcnow().date()
         with driver.session() as session:
-            result = session.run("MATCH (t:Task) WHERE t.status = 'pending' RETURN t")
+            result = session.run(
+                """
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
+                WHERE t.status = 'pending'
+                RETURN t
+                """,
+                email=user_email,
+            )
             raw = [r['t'] for r in result]
 
         entries = []
@@ -1232,11 +1267,11 @@ def _is_important(task):
         return False
 
 @app.get('/api/schedule/eisenhower')
-async def api_eisenhower_schedule(max: int | None = None):
+async def api_eisenhower_schedule(request: Request, max: int | None = None, email: Optional[str] = None):
     """Return Eisenhower matrix schedule."""
     try:
-        # Delegate heavy lifting to helper that computes quadrants and prioritized list
-        quadrants, prioritized_final = _compute_eisenhower_quadrants(max_items=max)
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        quadrants, prioritized_final = _compute_eisenhower_quadrants(max_items=max, email=user_email)
         return JSONResponse(content={
             'quadrants': quadrants,
             'prioritized': prioritized_final
@@ -1246,7 +1281,7 @@ async def api_eisenhower_schedule(max: int | None = None):
         return JSONResponse(content={'error': 'Could not compute Eisenhower schedule'}, status_code=500)
 
 
-def _compute_eisenhower_quadrants(max_items: int | None = None):
+def _compute_eisenhower_quadrants(max_items: int | None = None, *, email: Optional[str] = None):
     """Compute Eisenhower quadrants and return (quadrants_dict, prioritized_list).
 
     This function encapsulates the logic previously in the endpoint so it can be
@@ -1256,7 +1291,16 @@ def _compute_eisenhower_quadrants(max_items: int | None = None):
     """
     max_items = max_items
     with driver.session() as session:
-        result = session.run("MATCH (t:Task) WHERE t.status = 'pending' RETURN t")
+        active_email = email or DEFAULT_USER_EMAIL
+        ensure_user_and_day(session, active_email)
+        result = session.run(
+            """
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
+            WHERE t.status = 'pending'
+            RETURN t
+            """,
+            email=active_email,
+        )
         tasks = [neo4j_to_serializable(r['t']) for r in result]
         print(f"📊 Eisenhower helper - Found {len(tasks)} pending tasks")
 
@@ -1358,10 +1402,11 @@ def _compute_eisenhower_quadrants(max_items: int | None = None):
 
 
 @app.get('/api/schedule/eisenhower/matrix')
-async def api_eisenhower_matrix():
+async def api_eisenhower_matrix(request: Request, email: Optional[str] = None):
     """Return a concise Eisenhower matrix summary (counts + brief task list per quadrant)."""
     try:
-        quadrants, _ = _compute_eisenhower_quadrants(max_items=None)
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        quadrants, _ = _compute_eisenhower_quadrants(max_items=None, email=user_email)
         matrix_summary = {}
         for k, items in quadrants.items():
             matrix_summary[k] = {
@@ -1394,6 +1439,10 @@ async def api_login(request: Request, response: Response):
 
             user = rec['u']
             user_obj = {k: neo4j_to_serializable(v) for k,v in dict(user).items()} if hasattr(user, 'items') else dict(user)
+<<<<<<< HEAD
+            touch_user_login(session, email=email, name=user_obj.get('name'))
+            ensure_user_and_day(session, email=email, name=user_obj.get('name'))
+=======
             # Create a server-side session token stored in Mongo and set an HttpOnly cookie
             try:
                 db = get_mongo_db()
@@ -1412,6 +1461,7 @@ async def api_login(request: Request, response: Response):
             except Exception as e:
                 print(f"Warning: could not create server session: {e}")
 
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
             return {
                 'id': user_obj.get('id'),
                 'name': user_obj.get('name'),
@@ -1427,6 +1477,11 @@ async def api_login(request: Request, response: Response):
 async def api_me(request: Request):
     """Return current user info."""
     try:
+<<<<<<< HEAD
+        email_candidate = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+        payload = {'email': email_candidate} if email_candidate else None
+        user_email = _resolve_user_email(request, payload)
+=======
         # Prefer session cookie for authentication, fall back to header
         cookie_token = request.cookies.get('trackeneer_session')
         email_hdr = None
@@ -1454,14 +1509,13 @@ async def api_me(request: Request):
 
         if not email_hdr:
             email_hdr = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
         with driver.session() as session:
-            if email_hdr:
-                rec = session.run("MATCH (u:User {email: $email}) RETURN u", email=email_hdr).single()
-            else:
-                rec = session.run("MATCH (u:User) RETURN u LIMIT 1").single()
+            ensure_user_and_day(session, user_email)
+            rec = session.run("MATCH (u:User {email: $email}) RETURN u", email=user_email).single()
 
         if not rec:
-            return {'id': None, 'name': 'Guest', 'email': None}
+            return {'id': None, 'name': 'Guest', 'email': user_email}
 
         user = rec['u']
         user_obj = {k: neo4j_to_serializable(v) for k, v in dict(user).items()} if hasattr(user, 'items') else dict(user)
@@ -1508,6 +1562,20 @@ async def api_signup(request: Request):
             users = db.users
             if users.find_one({'email': email}):
                 raise HTTPException(status_code=409, detail='User already exists')
+<<<<<<< HEAD
+            session.run("""
+                CREATE (u:User {
+                    id: $id, 
+                    name: $name, 
+                    email: $email, 
+                    password: $password, 
+                    createdAt: datetime()
+                })
+            """, id=user_id, name=name, email=email, password=password)
+            touch_user_login(session, email=email, name=name)
+            ensure_user_and_day(session, email=email, name=name)
+=======
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
 
             # simple sha256 hashing (replace with bcrypt for production)
             pwd_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -1740,12 +1808,12 @@ async def api_forgot_password(request: Request):
                 raise HTTPException(status_code=400, detail='Missing email')
 
         with driver.session() as session:
-            rec = session.run("MATCH (u:User {email: $email}) RETURN u", email=email).single()
-            if not rec:
-                user_id = str(uuid.uuid4())
-                session.run("""
-                    CREATE (u:User {id: $id, email: $email, createdAt: datetime()})
-                """, id=user_id, email=email)
+            session.run("""
+                MERGE (u:User {email: $email})
+                  ON CREATE SET u.id = randomUUID(), u.createdAt = datetime()
+            """, email=email)
+            touch_user_login(session, email=email)
+            ensure_user_and_day(session, email=email)
             
             otp = str(random.randint(100000, 999999))
             expiry = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
@@ -1837,6 +1905,8 @@ async def api_reset_password(request: Request):
                 SET u.password = $pw 
                 REMOVE u.otp, u.otpExpiry
             """, email=email, pw=new_password)
+            touch_user_login(session, email=email)
+            ensure_user_and_day(session, email=email)
 
         return {'message': 'Password reset successful'}
     except HTTPException:
