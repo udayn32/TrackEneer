@@ -1,0 +1,20 @@
+// Insights Module Flowchart
+digraph {
+	rankdir=TB size=8
+	A [label="User selects year and branch" shape=box]
+	B [label="Check cache for existing guidance" shape=diamond]
+	C [label="Return cached content" shape=box]
+	D [label="Generate prompt for Cohere AI" shape=box]
+	E [label="Call Cohere AI API" shape=box]
+	F [label="Receive personalized guidance" shape=box]
+	G [label="Cache response for 24 hours" shape=box]
+	H [label="Display structured guidance" shape=box]
+	A -> B
+	B -> C [label="Cache hit"]
+	B -> D [label="Cache miss"]
+	D -> E
+	E -> F
+	F -> G
+	G -> H
+	C -> H
+}

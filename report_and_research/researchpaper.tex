@@ -14,7 +14,7 @@
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 \begin{document}
 
-\title{Design and Implementation of a Smart Academic Companion for Engineering Students Using AI, LayoutLMv3, MiniLMv6, spaCy, and Intelligent Scheduling (TrackEneer)
+\title{Design and Implementation of a Smart Academic Companion for Engineering Students Using AI, Sentence Transformers, spaCy, Gemini AI, Cohere AI, and Intelligent Scheduling (TrackEneer)
 }
 
 \author{\IEEEauthorblockN{Himanshu Pandey}
@@ -51,17 +51,17 @@ suhas.l@student.xavier.ac.in}
 \maketitle
 
 \begin{abstract}
-This paper introduces TrackEneer, an AI-powered academic companion designed to assist engineering students in managing their studies, notes, placement preparation, and personalized academic guidance. The system implements a comprehensive multi-module architecture featuring: (1) an intelligent scheduling system utilizing Neo4j graph database and sentence-transformers for dynamic task management, (2) a study module for organizing academic materials with semantic search capabilities using MiniLMv6 embeddings and spaCy NER, (3) an AI-powered placement preparation module leveraging Google's Gemini AI for company research and interview preparation, (4) a personalized insights module using Cohere AI to generate year and branch-specific academic guidance, and (5) a real-time notification service with WebSocket and Web Push integration. The platform employs a microservices architecture with Next.js frontend and FastAPI/Flask backends, ChromaDB for vector storage, and MongoDB for document persistence. This paper details the design, architecture, implementation, and evaluation of TrackEneer, demonstrating its effectiveness in enhancing academic productivity through intelligent automation and personalized recommendations.
+This paper introduces TrackEneer, an AI-powered academic companion designed to assist engineering students in managing their studies, notes, placement preparation, and personalized academic guidance. The system implements a comprehensive multi-module architecture featuring: (1) an intelligent scheduling system utilizing Neo4j graph database and sentence-transformers for dynamic task management, (2) a study module for organizing academic materials with semantic search capabilities using all-mpnet-base-v2 embeddings and spaCy NER, (3) an AI-powered placement preparation module leveraging Google's Gemini AI for company research and interview preparation, (4) a personalized insights module using Cohere AI to generate year and branch-specific academic guidance, and (5) a real-time notification service with WebSocket and Web Push integration. The platform employs a modular architecture with Next.js frontend and FastAPI backend, ChromaDB for vector storage, and MongoDB for document persistence. This paper details the design, architecture, implementation, and evaluation of TrackEneer, demonstrating its effectiveness in enhancing academic productivity through intelligent automation and personalized recommendations.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Artificial Intelligence, Neo4j, Sentence Transformers, spaCy, NER, Gemini AI, Cohere AI, Intelligent Scheduling, Microservices, Academic Companion, Engineering Education.
+Artificial Intelligence, Neo4j, Sentence Transformers, spaCy, NER, Gemini AI, Cohere AI, Intelligent Scheduling, Modular Architecture, Academic Companion, Engineering Education.
 \end{IEEEkeywords}
 
 \section{Introduction}
 The contemporary engineering curriculum imposes substantial cognitive loads on students, who must navigate a complex ecosystem of academic materials, from dense syllabi and extensive lecture notes to the rigorous demands of placement preparation. While the proliferation of digital tools has offered some relief, it has paradoxically led to a fragmented technological landscape. Students often find themselves juggling disparate platforms for note-taking, task scheduling, and career preparation, a practice that engenders inefficiency and exacerbates cognitive overload. A fundamental limitation of these conventional tools is their inability to semantically interpret academic documents, necessitating laborious manual data entry for tasks like creating study plans or organizing notes. This absence of intelligent automation constitutes a significant impediment to effective time and information management.
 
-This paper posits that a paradigm shift is necessary, moving from a collection of isolated tools to a single, integrated intelligent system. We introduce TrackEneer, an AI-driven academic companion engineered to address these systemic challenges. TrackEneer functions as a unified platform implemented through microservices architecture, orchestrating multiple specialized AI technologies: Google Gemini AI for intelligent company research and placement preparation, Cohere AI for personalized year-specific and branch-specific academic guidance, Sentence Transformers for semantic task understanding, spaCy for natural language processing, Neo4j for graph-based intelligent scheduling, and ChromaDB for vector similarity search. The system integrates real-time WebSocket notifications, ensuring students never miss critical deadlines. This approach aligns with the emerging concept of hybrid intelligence systems in education, where the symbiotic interplay between human cognition and artificial intelligence serves not merely to automate tasks, but to augment and enhance the user's cognitive and learning capabilities \cite{b10}.
+This paper posits that a paradigm shift is necessary, moving from a collection of isolated tools to a single, integrated intelligent system. We introduce TrackEneer, an AI-driven academic companion engineered to address these systemic challenges. TrackEneer functions as a unified platform implemented through modular architecture, orchestrating multiple specialized AI technologies: Google Gemini AI for intelligent company research and placement preparation, Cohere AI for personalized year-specific and branch-specific academic guidance, Sentence Transformers for semantic task understanding, spaCy for natural language processing, Neo4j for graph-based intelligent scheduling, and ChromaDB for vector similarity search. The system integrates real-time WebSocket notifications, ensuring students never miss critical deadlines. This approach aligns with the emerging concept of hybrid intelligence systems in education, where the symbiotic interplay between human cognition and artificial intelligence serves not merely to automate tasks, but to augment and enhance the user's cognitive and learning capabilities \cite{b10}.
 
 \section{Literature Survey}
 The theoretical foundations of TrackEneer are rooted in several intersecting domains of research: educational technology, document intelligence, and automated scheduling. Existing literature provides a strong precedent for the individual components of our system, yet reveals a gap in their holistic integration.
@@ -105,14 +105,14 @@ Engineering students currently lack an intelligent, centralized system that can 
 \subsection{Objective}
 The main objective of TrackEneer is to develop a smart academic companion that addresses the aforementioned problems. The specific objectives are:
 \begin{enumerate}
-    \item \textbf{Automate Syllabus and Note Organization:} To use document intelligence models (LayoutLMv3, MiniLMv6) to automatically extract, structure, and tag content from syllabi and uploaded notes.
+    \item \textbf{Automate Syllabus and Note Organization:} To use document intelligence models (Sentence Transformers all-mpnet-base-v2) to automatically extract, structure, and tag content from syllabi and uploaded notes.
     \item \textbf{Enable Personalized Study Scheduling:} To implement an intelligent scheduling algorithm that creates dynamic study plans based on the extracted syllabus content, user-defined goals, and time availability.
     \item \textbf{Curate Placement Preparation Content:} To build an AI-powered module that retrieves and organizes placement resources such as past papers, aptitude questions, and mock tests relevant to the user's target companies.
     \item \textbf{Enhance Accessibility and Context-Awareness:} To use NLP techniques (spaCy) to make academic content easily searchable and to provide context-aware recommendations for study and placement preparation.
 \end{enumerate}
 
 \section{System Architecture}
-The architecture of TrackEneer implements a modern microservices design pattern to ensure modularity, independent scalability, and fault isolation. The system comprises three primary layers: a presentation layer (frontend), a distributed service layer (backend microservices), and an intelligence layer (AI models and databases). Figure \ref{fig:architecture} illustrates the high-level system architecture and data flow.
+The architecture of TrackEneer implements a modern modular design pattern to ensure modularity, independent scalability, and fault isolation. The system comprises three primary layers: a presentation layer (frontend), a unified backend layer (FastAPI application with multiple routers), and an intelligence layer (AI models and databases). Figure \ref{fig:architecture} illustrates the high-level system architecture and data flow.
 
 \subsection{Frontend}
 The frontend, developed using \textbf{Next.js 15} with \textbf{React 19} and styled with \textbf{Tailwind CSS 4}, serves as the unified human-computer interface. The application implements a single-page architecture with multiple routes:
@@ -127,19 +127,19 @@ The frontend, developed using \textbf{Next.js 15} with \textbf{React 19} and sty
 The frontend employs \textbf{NextAuth} for OAuth authentication, \textbf{Framer Motion} for smooth animations, and maintains WebSocket connections for real-time notifications. The consistent dark theme with cyan-blue-purple gradients across all modules provides a cohesive user experience. All API communication uses RESTful endpoints with JSON payloads, and the application implements client-side caching for improved performance.
 
 \subsection{Backend}
-The backend service layer implements a microservices architecture using \textbf{FastAPI} and \textbf{Flask} frameworks, providing modular, scalable services. The system comprises four independent backend services:
+The backend implements a unified FastAPI application with modular routers, providing organized, scalable services. The system comprises several integrated modules within a single FastAPI application:
 \begin{itemize}
-    \item \textbf{Scheduler Service (Port 5000):} FastAPI-based service managing tasks, schedules, and deadlines with Neo4j integration
-    \item \textbf{Placement Service (Port 5003):} FastAPI service for AI-powered company research using Gemini AI
-    \item \textbf{Insights Service (Port 5004):} FastAPI service generating personalized academic guidance with Cohere AI
-    \item \textbf{Study Service (Port 5001):} FastAPI service managing notes, subjects, and study materials
-    \item \textbf{Notification Service (Port 3001):} Express/TypeScript service handling Web Push notifications via WebSocket
+    \item \textbf{Scheduler Module:} Core module managing tasks, schedules, and deadlines with Neo4j integration
+    \item \textbf{Placement Module:} Module for AI-powered company research using Gemini AI
+    \item \textbf{Insights Module:} Module generating personalized academic guidance with Cohere AI
+    \item \textbf{Study Module:} Module managing notes, subjects, and study materials
+    \item \textbf{Notification Service:} Standalone Express/TypeScript service handling Web Push notifications via WebSocket
 \end{itemize}
 
-Data persistence is handled through a multi-database approach: \textbf{Neo4j} graph database for task relationships and scheduling, \textbf{MongoDB} for document storage, \textbf{ChromaDB} for vector embeddings, and JSON file storage for cached AI-generated content.
+The unified backend runs on port 5000, with the notification service on port 3001. Data persistence is handled through a multi-database approach: \textbf{Neo4j} graph database for task relationships and scheduling, \textbf{MongoDB} for document storage, \textbf{ChromaDB} for vector embeddings, and JSON file storage for cached AI-generated content.
 
 \subsection{AI Layer}
-The AI layer represents the core intellectual capital of TrackEneer, implementing multiple specialized models distributed across microservices:
+The AI layer represents the core intellectual capital of TrackEneer, implementing multiple specialized models distributed across modules:
 \begin{itemize}
     \item \textbf{Sentence Transformers (all-mpnet-base-v2):} A sentence-transformer model generating dense vector embeddings for semantic search and content similarity. Used in the scheduler service for task classification and similarity matching, achieving efficient semantic understanding of academic content.
     \item \textbf{spaCy (en\_core\_web\_sm):} A production-grade NLP library used for Named Entity Recognition (NER) and text processing. Employed in the scheduler service to extract and tag academic entities, enabling intelligent task categorization.
@@ -271,10 +271,10 @@ The survey validated the core value propositions of TrackEneer. The implemented 
 The TrackEneer system has been successfully implemented and deployed as a fully functional multi-module platform. The following sections detail the performance characteristics and capabilities of each module.
 
 \subsection{System Architecture Performance}
-The microservices architecture demonstrates excellent modularity and scalability. Each service operates independently on dedicated ports, allowing for parallel development and deployment. Table \ref{tab:service_ports} summarizes the service distribution and technologies employed.
+The modular architecture demonstrates excellent modularity and scalability. The unified backend operates on a single port with independent routers, allowing for organized development and deployment. Table \ref{tab:service_ports} summarizes the service distribution and technologies employed.
 
 \begin{table}[htbp]
-\caption{TrackEneer Microservices Architecture}
+\caption{TrackEneer Modular Architecture}
 \label{tab:service_ports}
 \begin{center}
 \begin{tabular}{|l|c|l|}
@@ -283,15 +283,9 @@ The microservices architecture demonstrates excellent modularity and scalability
 \hline
 Frontend & 3000 & Next.js 15, React 19, Tailwind CSS \\
 \hline
-Scheduler & 5000 & FastAPI, Neo4j, ChromaDB, spaCy \\
+Unified Backend & 5000 & FastAPI with modular routers (Scheduler, Study, Placement, Insights); Neo4j, ChromaDB, spaCy, Gemini AI, Cohere AI \\
 \hline
-Study Module & 5001 & FastAPI, JSON Storage \\
-\hline
-Placement & 5003 & FastAPI, Gemini AI \\
-\hline
-Insights & 5004 & FastAPI, Cohere AI \\
-\hline
-Notifications & 3001 & Express, TypeScript, Web Push \\
+Notification Service & 3001 & Express, TypeScript, Web Push \\
 \hline
 \end{tabular}
 \end{center}
@@ -347,7 +341,7 @@ Database deployment is similarly flexible: Neo4j can be deployed locally or on c
 \subsection{Security and Privacy Considerations}
 The system implements OAuth-based authentication through NextAuth, supporting multiple providers including Google, GitHub, and institutional SSO systems. API keys for external AI services (Gemini, Cohere) are configured server-side, preventing exposure to client applications. WebSocket connections implement origin validation via CORS policies, restricting connections to authorized frontend origins. User data, including tasks, notes, and schedules, remains isolated per user account with access controlled through authentication middleware.
 
-While the current implementation focuses on core functionality, production deployment would benefit from additional security measures including HTTPS enforcement, rate limiting on API endpoints, database access control lists, encrypted storage of sensitive user data, and comprehensive audit logging. The microservices architecture facilitates adding these security layers without disrupting existing functionality.
+While the current implementation focuses on core functionality, production deployment would benefit from additional security measures including HTTPS enforcement, rate limiting on API endpoints, database access control lists, encrypted storage of sensitive user data, and comprehensive audit logging. The modular architecture facilitates adding these security layers without disrupting existing functionality.
 
 \section{Implementation Technologies and Integration}
 \subsection{Frontend Technologies}
@@ -386,9 +380,9 @@ The potential impact of TrackEneer extends beyond individual productivity to bro
     \item \textbf{Academic Efficiency and Mental Well-being:} By automating routine organizational tasks and providing real-time notifications, TrackEneer significantly reduces cognitive load on students. The intelligent scheduling system prevents deadline misses, while the AI-powered guidance modules provide personalized academic counseling. The 24-hour caching mechanism ensures instant access to frequently needed information, eliminating wait times and reducing stress associated with information retrieval.
     \item \textbf{Equitable Education:} The platform democratizes access to sophisticated AI-powered academic support. Features like Gemini AI-powered company research and Cohere-based personalized guidance, typically available only through expensive coaching programs, are now accessible to all students. This levels the playing field, particularly benefiting students from underprivileged backgrounds who may lack access to premium career counseling services.
     \item \textbf{Placement Preparation Democratization:} The placement module provides comprehensive company insights, interview preparation tips, and placement process details that were previously scattered across expensive prep platforms. The AI-generated content quality rivals or exceeds human-curated resources, making high-quality placement preparation accessible to all engineering students regardless of financial constraints.
-    \item \textbf{Time Optimization:} The intelligent caching system (24-hour validity for AI-generated content) reduces redundant API calls by 80-90\%, demonstrating efficient resource utilization. The microservices architecture enables selective module activation, reducing server resource consumption when certain features are not in use.
+    \item \textbf{Time Optimization:} The intelligent caching system (24-hour validity for AI-generated content) reduces redundant API calls by 80-90\%, demonstrating efficient resource utilization. The modular architecture enables selective module activation, reducing server resource consumption when certain features are not in use.
     \item \textbf{Sustainability:} By facilitating fully digital workflows for academic management, TrackEneer eliminates the need for paper-based planners, printed company research materials, and physical note organization systems. The optimization of study time through intelligent scheduling represents efficient use of students' cognitive resources, a form of personal sustainability that promotes work-life balance and reduces academic burnout.
-    \item \textbf{Scalability for Institutional Deployment:} The microservices architecture and caching mechanisms make TrackEneer suitable for institutional deployment serving thousands of students. The distributed service design enables horizontal scaling, while intelligent caching dramatically reduces infrastructure costs at scale.
+    \item \textbf{Scalability for Institutional Deployment:} The modular architecture and caching mechanisms make TrackEneer suitable for institutional deployment serving thousands of students. The organized service design enables horizontal scaling, while intelligent caching dramatically reduces infrastructure costs at scale.
 \end{itemize}
 
 \section{Implementation Challenges and Lessons Learned}
@@ -400,38 +394,23 @@ The development of TrackEneer presented several technical challenges that yielde
     \item \textbf{WebSocket Connection Management:} Maintaining stable WebSocket connections across network disruptions required implementing exponential backoff retry logic and connection health checks. The solution involved a background reconnection handler that automatically re-establishes dropped connections without user intervention.
     \item \textbf{Neo4j DateTime Serialization:} Neo4j's native DateTime and Date types are not JSON-serializable, causing serialization errors in API responses. This was resolved by implementing a recursive \texttt{neo4j\_to\_serializable} function that converts Neo4j temporal types to ISO format strings.
     \item \textbf{AI Model API Rate Limits:} Initial implementations exceeded free-tier rate limits for Gemini and Cohere APIs. The 24-hour caching mechanism was introduced to dramatically reduce API calls while maintaining content freshness.
-    \item \textbf{CORS Configuration:} The microservices architecture required careful CORS configuration to allow cross-origin requests from the Next.js frontend (port 3000) to multiple backend services (ports 5000-5004, 3001). This was addressed through explicit CORS middleware configuration in each FastAPI/Express service.
+    \item \textbf{CORS Configuration:} The modular architecture required careful CORS configuration to allow cross-origin requests from the Next.js frontend (port 3000) to the unified backend (port 5000) and notification service (port 3001). This was addressed through explicit CORS middleware configuration in FastAPI and Express services.
 \end{itemize}
 
 \subsection{Lessons Learned}
 \begin{itemize}
-    \item \textbf{Microservices Modularity:} The decision to separate concerns into independent services proved invaluable for parallel development, independent scaling, and fault isolation. Issues in one module do not affect others.
+    \item \textbf{Modular Design Benefits:} The decision to implement a unified backend with modular routers proved invaluable for organized development, easier maintenance, and fault isolation. Issues in one module do not affect others while maintaining simplicity in deployment.
     \item \textbf{Intelligent Caching is Essential:} For AI-powered applications interfacing with external LLM APIs, aggressive caching with reasonable TTLs (24 hours in our case) is not optional—it's essential for both cost management and performance.
     \item \textbf{Graph Databases for Temporal Relationships:} Neo4j's Cypher query language proved exceptionally well-suited for scheduling queries involving temporal relationships and dependencies, outperforming relational database alternatives for complex task relationship queries.
     \item \textbf{User-Centric Design Validation:} The initial survey validated assumptions about user needs but couldn't fully predict feature prioritization. The insights module, added based on user feedback during development, became the highest-rated feature (4.9/5), demonstrating the value of iterative user input.
 \end{itemize}
 
-\section{Future Work}
-While TrackEneer has successfully implemented core functionality across all modules, several enhancements are planned for future releases:
-\begin{itemize}
-    \item \textbf{Document Intelligence Integration:} Integration of LayoutLMv3 or similar models for automatic syllabus extraction and structuring from PDF uploads in the study module
-    \item \textbf{Advanced Analytics Dashboard:} Implementation of progress tracking, study pattern analysis, and performance metrics visualization
-    \item \textbf{Collaborative Features:} Addition of group study tools, shared notes, and collaborative task management
-    \item \textbf{Mobile Application:} Development of native mobile apps for iOS and Android with offline support
-    \item \textbf{Enhanced Recommendation System:} Machine learning-based recommendations for study schedules based on historical performance and learning patterns
-    \item \textbf{Interview Practice Module:} AI-powered mock interview system with speech recognition and feedback
-    \item \textbf{Resume Builder and Analyzer:} Automated resume optimization using NLP to match job descriptions
-    \item \textbf{Integration with Learning Management Systems:} API integrations with popular LMS platforms for automatic assignment import
-    \item \textbf{Calendar Synchronization:} Two-way sync with Google Calendar, Outlook, and other calendar services
-    \item \textbf{Gamification:} Achievement system, streaks, and leaderboards to increase student engagement
-\end{itemize}
-
 \section{Conclusion}
-This paper has detailed the design, architecture, implementation, and evaluation of TrackEneer, an AI-powered academic companion that successfully bridges the gap between academic organization and placement readiness for engineering students. The system implements a comprehensive microservices architecture featuring four specialized backend services (scheduler, study, placement, insights) integrated with a modern Next.js frontend and real-time notification service.
+This paper has detailed the design, architecture, implementation, and evaluation of TrackEneer, an AI-powered academic companion that successfully bridges the gap between academic organization and placement readiness for engineering students. The system implements a comprehensive modular architecture featuring a unified backend with specialized routers (scheduler, study, placement, insights) integrated with a modern Next.js frontend and real-time notification service.
 
 By leveraging multiple AI technologies—including Sentence Transformers for semantic search, spaCy for NLP, Google Gemini AI for placement research, Cohere AI for personalized guidance, and Neo4j for intelligent graph-based scheduling—TrackEneer provides a powerful, integrated platform for holistic academic management. The implementation demonstrates significant advantages over fragmented existing solutions, offering students a unified workspace for managing studies, schedules, placement preparation, and receiving personalized academic counseling.
 
-Key achievements include: (1) real-time WebSocket-based notification system with sub-500ms latency, (2) intelligent 24-hour caching reducing API costs by 80-90\%, (3) semantic task classification with 85-90\% accuracy, (4) comprehensive AI-generated content for 1000+ potential company-year-branch combinations, and (5) scalable microservices architecture supporting institutional deployment.
+Key achievements include: (1) real-time WebSocket-based notification system with sub-500ms latency, (2) intelligent 24-hour caching reducing API costs by 80-90\%, (3) semantic task classification with 85-90\% accuracy, (4) comprehensive AI-generated content for 1000+ potential company-year-branch combinations, and (5) scalable modular architecture supporting institutional deployment.
 
 The successful implementation of TrackEneer demonstrates the transformative potential of AI in education, not merely as an automation tool but as an intelligent companion that augments students' cognitive capabilities, reduces stress, democratizes access to premium resources, and optimizes the use of their most valuable resource—time. As engineering education continues to evolve, systems like TrackEneer represent the future of student support: personalized, intelligent, comprehensive, and accessible to all.
 

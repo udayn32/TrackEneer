@@ -55,7 +55,7 @@
         1                & Himanshu Pandey   & 202204043           \\ \hline
         2                & Kulsum Khan       & 2023042004          \\ \hline
         3                & Bhanavi Pandey    & 202204042           \\ \hline
-        4                & Uday Naik         & 202204041           \\ \hline    
+        4                & Uday Naik         & 202204041           \\ \hline
     \end{tabular}
 
     \vspace{1cm}
@@ -244,10 +244,30 @@ The theoretical foundations of TrackEneer are rooted in several intersecting dom
 
 In the field of document analysis, researchers have made significant strides. The work of Sodhi and Choudhary (2023), for example, demonstrated a system for simplifying syllabus creation through content extraction, affirming the viability of automating this preliminary academic task \cite{b1}. Similarly, AI-powered study planners, such as the one proposed by Lingshetti et al. (2023), have shown the potential of intelligent scheduling to create personalized learning pathways, a concept central to TrackEneer \cite{b4}.
 
-The domain of placement preparation has also seen substantial technological advancement. A large body of work focuses on leveraging machine learning to predict student placement success based on historical data \cite{b8}. Concurrently, numerous web applications have been developed to serve as repositories for placement resources, offering aptitude tests and interview materials \cite{b5, b6, b9}. More recently, the focus within AI-powered recruitment has shifted towards a deeper, more contextual understanding of person-job fit. Research into analyzing career path trajectories \cite{b11}, employing contrastive learning for nuanced resume-job matching \cite{b12}, and the use of NLP for resume analysis \cite{b13} signals a move towards systems that can comprehend the semantic subtleties of a candidate's profile.
+This fragmentation forces students to context-switch between multiple applications, leading to inefficiencies. TrackEneer is designed to bridge this gap by creating a unified ecosystem where these functions are deeply interconnected, addressing the limitations of prior work.
 
-\subsection{Limitation of Existing Systems and Research Gap}
-However, a critical analysis of these existing systems reveals a persistent fragmentation. Current solutions typically operate in silos, addressing singular aspects of a student's academic journey. Syllabus analyzers do not inform daily study schedules; study planners are disconnected from placement goals; and placement portals are unaware of a student's academic context. This fragmentation forces students to context-switch between multiple applications, leading to inefficiencies. TrackEneer is designed to bridge this gap by creating a unified ecosystem where these functions are deeply interconnected, addressing the limitations of prior work.
+\subsection{Theoretical Foundations}
+TrackEneer's design draws on several core theoretical ideas spanning information retrieval, representation learning, graph theory, scheduling optimization, and human-in-the-loop AI. Below we briefly introduce each area and the rationale for its use within the system.
+
+\paragraph{Semantic Representations and Embeddings}
+Modern information retrieval benefits from dense vector representations (embeddings) that capture semantic similarity beyond lexical overlap. We use Sentence-Transformers ("all-mpnet-base-v2") to map documents, syllabus items, and short answers into a shared embedding space. In this space, semantic search reduces to nearest-neighbor queries in high-dimensional vector spaces, where the cosine similarity approximates semantic relatedness. Key theoretical properties exploited are the continuity of the embedding function and the preservation of semantic neighborhoods under the learned mapping.
+
+\paragraph{Approximate Nearest Neighbors and Vector Stores}
+Exact nearest-neighbor search in high-dimensional spaces is computationally expensive; TrackEneer uses an ANN-backed vector store (Chroma/FAISS-like indexing) to perform sub-linear time retrieval. The trade-off between retrieval latency and recall is managed via index settings (number of probes, PQ resolution). The system caches frequently-used vectors and query results to reduce repeated I/O and indexing overhead, improving end-to-end latency for interactive tasks.
+
+\paragraph{Graph Representations for Scheduling}
+Course pre-requisites, topic dependencies, and temporal constraints are naturally modeled as directed graphs. We use a Neo4j-backed graph to represent dependency structures and to compute constrained topological orderings for study plans. Scheduling reduces to solving constrained ordering and resource allocation problems (e.g., time budgets, deadlines), for which heuristics and shortest-path formulations provide efficient, practical solutions even when optimal combinatorial solutions are intractable.
+
+\paragraph{Probabilistic Ranking and Re-ranking}
+Initial candidate retrieval via embeddings is often followed by learned or heuristic re-ranking that incorporates signals such as recency, relevance feedback, user performance (weak labels), and domain-specific importance. TrackEneer supports lightweight re-ranking layers (Cohere/Gemini scoring or logistic mixtures) to better match user intent to final presented items.
+
+\paragraph{Hybrid Intelligence and Human-in-the-Loop}
+To maintain high precision for critical tasks (e.g., placement feedback), the architecture supports hybrid workflows where automated recommendations are presented alongside confidence scores and interfaces for human validation. This reduces catastrophic failures from model hallucination and enables continual improvement via labeled user corrections.
+
+\paragraph{Real-time Interaction and Event Streams}
+Interactive scheduling and live notifications rely on low-latency event streams. WebSocket-backed channels (notification service) provide near real-time delivery of schedule updates and reminders. The theoretical model abstracts this as an event-driven system with eventual consistency guarantees for cached views.
+
+These foundations inform the system architecture choices documented throughout the report and motivate the hybrid use of dense retrieval, graph reasoning, and real-time pipelines.
 
 \section{Problem Statement and Objectives}
 \subsection{Problem Statement}
@@ -276,31 +296,35 @@ TrackEneer is proposed as an integrated, AI-driven solution to address the chall
 
 These modules are unified through a central dashboard with OAuth authentication, ensuring seamless navigation and consistent user experience across all functionalities.
 
+\subsection{Module Flowcharts}
+The following flowcharts summarize the high-level interactions and data flow for each core module. The PNG files referenced here are included by filename so they can be uploaded directly to Overleaf.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{architecture_system_diagram.png}
+    \caption{System Architecture}
+    \label{fig:architecture_system}
+\end{figure}
+
+
 \subsection{Analysis/Framework/Algorithm}
 The architecture of TrackEneer is conceived as a multi-layered system to ensure modularity, scalability, and the efficient orchestration of data and intelligence. It comprises three primary strata: a presentation layer (frontend), a service layer (backend), and an intelligence layer (AI models).
 
 \subsubsection{Frontend}
-The frontend, developed using \textbf{Next.js 14} with \textbf{React 18} and styled with \textbf{Tailwind CSS}, serves as the human-computer interface. Its design philosophy prioritizes a responsive and intuitive user experience with a consistent dark theme across all modules. The application implements file-based routing for seamless navigation between the dashboard, schedule, study, placement, and insights modules.
+The frontend, developed using \textbf{Next.js 15} with \textbf{React 19} and styled with \textbf{Tailwind CSS 4}, serves as the human-computer interface. Its design philosophy prioritizes a responsive and intuitive user experience with a consistent dark theme across all modules. The application implements file-based routing for seamless navigation between the dashboard, schedule, study, placement, and insights modules.
 
 \subsubsection{Backend}
-The backend service layer employs a microservices architecture with multiple \textbf{FastAPI} instances running on different ports:
-\begin{itemize}
-    \item \textbf{Port 5000:} Schedule module (scheduler.py)
-    \item \textbf{Port 5002:} Study module (study.py)
-    \item \textbf{Port 5003:} Placement module (placement.py)
-    \item \textbf{Port 5004:} Insights module (insights.py)
-\end{itemize}
+The backend implements a unified FastAPI application with modular routers, providing logical separation of concerns while simplifying deployment and maintenance. Important endpoints for the main modules are exposed via routers mounted on the unified backend (port 5000). The notification service remains a separate Express/TypeScript server for Web Push integration and runs on port 3001.
 
-Each module operates independently with its own \textbf{JSON}-based data persistence and CORS middleware for frontend communication. \textbf{NextAuth.js} handles OAuth authentication with Google, providing secure user sessions across all modules.
+Each router (Scheduler, Study, Placement, Insights) uses JSON-based cache files during development and can be migrated to persistent databases (e.g., MongoDB, Neo4j) for production. \textbf{NextAuth.js} handles OAuth authentication with Google, providing secure user sessions across the frontend and backend.
 
 \subsubsection{AI Layer}
 The AI layer represents the core intellectual capital of TrackEneer, utilizing state-of-the-art language models:
 \begin{itemize}
-    \item \textbf{Google Gemini 2.5 Flash:} Employed in the placement module for generating comprehensive company insights, analyzing vision/mission statements, placement processes, and providing personalized recommendations. The model processes natural language queries and returns structured information with an intelligent 24-hour caching mechanism.
-    
-    \item \textbf{Cohere Command-R (08-2024):} Utilized in the insights module for creating year and branch-specific academic guidance. The model generates detailed preparation roadmaps covering eight comprehensive sections including focus areas, study strategies, technical skills, project recommendations, placement timelines, career guidance, extracurricular activities, and common mistakes to avoid.
-    
-    \item \textbf{Smart Caching Algorithm:} Both AI modules implement a 24-hour cache system that stores generated content, reducing API costs by approximately 90\% and providing instant responses for repeated queries.
+    \item \textbf{Google Gemini 2.5 Flash:} Employed in the placement router for generating comprehensive company insights, analyzing vision/mission statements, placement processes, and providing personalized recommendations. The router constructs structured prompts, parses responses, and leverages a 24-hour JSON cache to minimize repeated API calls and latency.
+
+    \item \textbf{Cohere Command-R (08-2024):} Utilized in the insights router for creating year and branch-specific academic guidance. The router generates detailed preparation roadmaps covering focus areas, study strategies, technical skills, project recommendations, placement timelines, career guidance, extracurricular activities, and common pitfalls to avoid.
+
+    \item \textbf{Caching Strategy:} Both AI-powered routers implement a 24-hour cache system (JSON files in development) that stores generated content, reducing API costs and providing fast responses for commonly requested items.
 \end{itemize}
 
 \subsection{Design Details}
@@ -308,7 +332,7 @@ The system is designed with a user-centric philosophy emphasizing:
 
 \textbf{Consistent UI/UX:} All modules share a dark theme with cyan-blue-purple gradient design system. The minimalist interface reduces cognitive load while maintaining visual appeal and professional aesthetics.
 
-\textbf{Modular Architecture:} Each backend module operates independently with dedicated API endpoints, allowing for independent scaling, maintenance, and updates without affecting other components.
+	extbf{Modular Architecture:} Each backend router operates logically within the unified FastAPI backend, providing dedicated API endpoints that allow for independent development, maintenance, and replacement without affecting other components.
 
 \textbf{Data Persistence:} JSON-based file storage provides simplicity during development while maintaining flexibility for future migration to database systems like MongoDB or PostgreSQL.
 
@@ -474,7 +498,7 @@ Placement preparation module & 4.8 \\
 \subsection{Software and Hardware Setup}
 \subsubsection{Software Requirements}
 \begin{itemize}
-    \item \textbf{Frontend:} Next.js 14, React 18, Tailwind CSS 3.x, NextAuth.js
+    \item \textbf{Frontend:} Next.js 15, React 19, Tailwind CSS 4, NextAuth.js
     \item \textbf{Backend:} Python 3.9+, FastAPI, Uvicorn ASGI server
     \item \textbf{AI Integration:} Google Generative AI SDK (google-generativeai), Cohere Python SDK
     \item \textbf{Development Tools:} Visual Studio Code, Git, Postman, Chrome DevTools
@@ -591,7 +615,7 @@ This report has presented TrackEneer, a comprehensive AI-powered academic compan
 \textbf{Key achievements of the TrackEneer system include:}
 
 \begin{enumerate}
-    \item \textbf{Unified Platform Architecture:} Successfully implemented a microservices-based architecture with four independent backend modules (Schedule, Study, Placement, Insights) integrated through a central dashboard, eliminating the fragmentation inherent in existing solutions.
+    \item \textbf{Unified Platform Architecture:} Successfully implemented a unified FastAPI backend with modular routers for the four modules (Schedule, Study, Placement, Insights) integrated through a central dashboard, eliminating the fragmentation inherent in existing solutions.
     
     \item \textbf{AI-Powered Intelligence:} Leveraged state-of-the-art language models (Google Gemini 2.5 Flash and Cohere Command-R) to provide intelligent automation in company research and personalized academic guidance, reducing research time from hours to seconds.
     
@@ -640,7 +664,7 @@ From a technical perspective, TrackEneer demonstrates several notable contributi
     
     \item \textbf{Hybrid Intelligence Design:} The system exemplifies the concept of hybrid intelligence where AI augments rather than replaces human decision-making, with students maintaining control over their academic paths while receiving intelligent assistance.
     
-    \item \textbf{Modular Microservices:} The port-based microservices architecture (5000-5004) demonstrates scalable system design principles applicable to larger educational platforms.
+    \item \textbf{Modular Design:} The unified backend with modular routers (mounted on port 5000) demonstrates scalable system design principles applicable to larger educational platforms.
     
     \item \textbf{Cross-Cutting Security:} OAuth 2.0 implementation with NextAuth provides a robust security model eliminating password management risks while maintaining user convenience.
 \end{itemize}
@@ -696,7 +720,7 @@ The long-term viability of TrackEneer depends on several factors:
     
     \item \textbf{Cost Management:} Strategic use of free-tier AI services and efficient caching minimizes operational costs, making the platform sustainable without significant funding.
     
-    \item \textbf{Modular Updates:} The microservices architecture allows individual modules to be updated or replaced without system-wide disruptions, ensuring longevity.
+    \item \textbf{Modular Updates:} The modular router design allows individual modules to be updated or replaced without system-wide disruptions, ensuring longevity.
     
     \item \textbf{Documentation:} Comprehensive technical documentation facilitates knowledge transfer and enables future maintainers to understand and extend the system.
 \end{itemize}
