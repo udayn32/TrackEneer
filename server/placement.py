@@ -7,10 +7,11 @@ from datetime import datetime
 from typing import Optional
 
 import google.generativeai as genai
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import get_driver
+from graph_helpers import ensure_user_and_day, normalize_day
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
@@ -35,6 +36,17 @@ CACHE_DURATION = 24 * 60 * 60  # 24 hours in seconds
 
 driver = get_driver()
 
+DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "demo@trackeneer.local")
+
+
+def _resolve_user_email(request: Request, provided: Optional[str] = None) -> str:
+    email = provided or request.headers.get("x-user-email") or request.headers.get("X-User-Email")
+    if not email:
+        email = DEFAULT_USER_EMAIL
+    if not email:
+        raise HTTPException(status_code=400, detail="User email is required")
+    return email.strip().lower()
+
 
 def _company_key(name: str) -> str:
     return name.lower().strip()
@@ -54,27 +66,32 @@ def _serialize_company(node) -> dict:
     }
 
 
-def _fetch_company(company_key: str) -> Optional[dict]:
+def _fetch_company(company_key: str, email: str, day: str) -> Optional[dict]:
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         record = session.run(
             """
-            MATCH (c:Company {key: $key})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_COMPANY]->(c:Company {key: $key, ownerEmail: $email, dayDate: $day})
             RETURN c
             """,
             key=company_key,
+            email=email,
+            day=day_iso,
         ).single()
         if record:
             return _serialize_company(record["c"])
         return None
 
 
-def _store_company(company_key: str, data: dict) -> None:
+def _store_company(company_key: str, data: dict, email: str, day: str) -> None:
     sections_json = json.dumps(data.get("sections", {}), ensure_ascii=False)
     score_info_json = json.dumps(data.get("score_info", {}), ensure_ascii=False)
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, email, day=day)
         session.run(
             """
-            MERGE (c:Company {key: $key})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})
+            MERGE (d)-[:HAS_COMPANY]->(c:Company {key: $key, ownerEmail: $email, dayDate: $day})
             SET c += {
                 companyName: $company_name,
                 website: $website,
@@ -91,6 +108,8 @@ def _store_company(company_key: str, data: dict) -> None:
             raw_content=data.get("raw_content"),
             generated_at=data.get("generated_at"),
             score_info=score_info_json,
+            email=email,
+            day=day_iso,
         )
 
 def is_cache_valid(timestamp: str) -> bool:
@@ -263,15 +282,20 @@ def root():
 
 @app.post("/api/placement/generate")
 async def generate_placement_info(
+    request: Request,
     company_name: str = Form(...),
-    website: str = Form(None)
+    website: str = Form(None),
+    day: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
 ):
     """Generate placement information for a company using Gemini AI"""
     
     try:
+        user_email = _resolve_user_email(request, email)
+        day_iso = normalize_day(day)
         company_key = _company_key(company_name)
 
-        cached = _fetch_company(company_key)
+        cached = _fetch_company(company_key, user_email, day_iso)
         if cached and is_cache_valid(cached.get("generated_at", "")):
             return {
                 "message": "Retrieved from cache",
@@ -293,11 +317,13 @@ async def generate_placement_info(
         score_info = generate_company_score(company_name, company_info)
         company_info["score_info"] = score_info
         
-        _store_company(company_key, company_info)
+        _store_company(company_key, company_info, user_email, day_iso)
 
         return {
             "message": "Information generated successfully",
             "cached": False,
+            "ownerEmail": user_email,
+            "dayDate": day_iso,
             **company_info
         }
     
@@ -310,10 +336,17 @@ async def generate_placement_info(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/placement/company/{company_name}")
-def get_company_info(company_name: str):
+def get_company_info(
+    company_name: str,
+    request: Request,
+    day: Optional[str] = None,
+    email: Optional[str] = None,
+):
     """Get cached company information"""
     company_key = _company_key(company_name)
-    company_info = _fetch_company(company_key)
+    user_email = _resolve_user_email(request, email)
+    day_iso = normalize_day(day)
+    company_info = _fetch_company(company_key, user_email, day_iso)
 
     if not company_info:
         raise HTTPException(status_code=404, detail="Company not found. Please generate information first.")
@@ -325,15 +358,20 @@ def get_company_info(company_name: str):
     }
 
 @app.get("/api/placement/companies")
-def list_companies():
+def list_companies(request: Request, day: Optional[str] = None, email: Optional[str] = None):
     """List all cached companies"""
+    user_email = _resolve_user_email(request, email)
+    day_iso = normalize_day(day)
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, user_email, day=day_iso)
         records = session.run(
             """
-            MATCH (c:Company)
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_COMPANY]->(c:Company)
             RETURN c
             ORDER BY c.companyName
-            """
+            """,
+            email=user_email,
+            day=day_iso,
         )
         companies = []
         for record in records:
@@ -350,18 +388,28 @@ def list_companies():
     return {"companies": companies, "total": len(companies)}
 
 @app.delete("/api/placement/company/{company_name}")
-def delete_company_cache(company_name: str):
+def delete_company_cache(
+    company_name: str,
+    request: Request,
+    day: Optional[str] = None,
+    email: Optional[str] = None,
+):
     """Delete cached company information"""
     company_key = _company_key(company_name)
+    user_email = _resolve_user_email(request, email)
+    day_iso = normalize_day(day)
     with driver.session() as session:
+        day_iso = ensure_user_and_day(session, user_email, day=day_iso)
         deleted = session.run(
             """
-            MATCH (c:Company {key: $key})
+            MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($day), email: $email})-[:HAS_COMPANY]->(c:Company {key: $key, ownerEmail: $email, dayDate: $day})
             WITH c
             DETACH DELETE c
             RETURN count(c) AS removed
             """,
             key=company_key,
+            email=user_email,
+            day=day_iso,
         ).single()
 
     if deleted["removed"]:

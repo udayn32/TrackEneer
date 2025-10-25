@@ -250,9 +250,9 @@ export default function StudyPage() {
                 >
                   All Notes
                 </button>
-                {subjects.map((subject) => (
+                {subjects.map((subject, index) => (
                   <button
-                    key={subject.id}
+                    key={`${subject.id ?? "subject"}-${index}`}
                     onClick={() => {
                       setSelectedSubject(subject);
                       fetchNotes(subject.id);
@@ -304,9 +304,9 @@ export default function StudyPage() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {notes.map((note) => (
+                  {notes.map((note, index) => (
                     <div
-                      key={note.id}
+                      key={`${note.id ?? "note"}-${index}`}
                       className="bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 rounded-lg border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200"
                     >
                       <div className="flex items-start justify-between mb-3">
