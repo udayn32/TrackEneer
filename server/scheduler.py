@@ -3,14 +3,70 @@ import uuid
 import chromadb
 import requests
 import aiohttp
-from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# huggingface_hub >= 0.16 removed `cached_download`, but sentence-transformers
+# still imports it. Provide a shim so newer versions remain compatible.
+import huggingface_hub  # type: ignore
+import hashlib
+from urllib.parse import urlparse
+
+def _cached_download(url: str | None = None, cache_dir: str | None = None, force_download: bool = False, resume_download: bool = False, extract_compressed_file: bool = False, *args, **kwargs):
+    """Compatibility shim for `cached_download` expected by older libs.
+
+    - If `url` is provided, download it to a cache directory and return the local path.
+    - Otherwise, defer to `hf_hub_download` when available.
+    This keeps sentence-transformers working with newer huggingface_hub releases.
+    """
+    # If a direct URL is provided, download and cache it.
+    if url:
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        parsed = urlparse(url)
+        ext = os.path.splitext(parsed.path)[1] or ""
+        key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        out_name = f"{key}{ext}"
+        out_path = os.path.join(cache_dir, out_name)
+
+        if not os.path.exists(out_path) or force_download:
+            # stream download
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+                tmp_path = out_path + ".tmp"
+                with open(tmp_path, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            fh.write(chunk)
+                os.replace(tmp_path, out_path)
+
+        return out_path
+
+    # Otherwise, try to delegate to hf_hub_download (newer API)
+    try:
+        from huggingface_hub import hf_hub_download
+        return hf_hub_download(*args, **kwargs)
+    except Exception:
+        raise
+
+
+# Ensure the compatibility function is available under the old name
+if not hasattr(huggingface_hub, "cached_download"):
+    huggingface_hub.cached_download = _cached_download  # type: ignore[attr-defined]
+
 from sentence_transformers import SentenceTransformer
 from datetime import datetime, timedelta, timezone
 import pytz
 import spacy
 from neo4j.time import DateTime, Date
+from pymongo.errors import PyMongoError
+from mongo import get_mongo_db
+import hashlib
+from fastapi import File, Form, UploadFile
+from pathlib import Path
 import random
 import asyncio
 import json
@@ -1364,7 +1420,7 @@ async def api_eisenhower_matrix(request: Request, email: Optional[str] = None):
 
 # --- Authentication Endpoints ---
 @app.post('/api/auth/login')
-async def api_login(request: Request):
+async def api_login(request: Request, response: Response):
     try:
         data = await request.json()
         email = data.get('email')
@@ -1383,8 +1439,29 @@ async def api_login(request: Request):
 
             user = rec['u']
             user_obj = {k: neo4j_to_serializable(v) for k,v in dict(user).items()} if hasattr(user, 'items') else dict(user)
+<<<<<<< HEAD
             touch_user_login(session, email=email, name=user_obj.get('name'))
             ensure_user_and_day(session, email=email, name=user_obj.get('name'))
+=======
+            # Create a server-side session token stored in Mongo and set an HttpOnly cookie
+            try:
+                db = get_mongo_db()
+                sessions = db.sessions
+                token = uuid.uuid4().hex
+                expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+                sessions.insert_one({
+                    'token': token,
+                    'userId': user_obj.get('id'),
+                    'email': user_obj.get('email'),
+                    'createdAt': datetime.utcnow().isoformat(),
+                    'expiresAt': expires_at
+                })
+                # set cookie (httpOnly)
+                response.set_cookie('trackeneer_session', token, httponly=True, samesite='lax', path='/', max_age=7*24*3600)
+            except Exception as e:
+                print(f"Warning: could not create server session: {e}")
+
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
             return {
                 'id': user_obj.get('id'),
                 'name': user_obj.get('name'),
@@ -1400,9 +1477,39 @@ async def api_login(request: Request):
 async def api_me(request: Request):
     """Return current user info."""
     try:
+<<<<<<< HEAD
         email_candidate = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
         payload = {'email': email_candidate} if email_candidate else None
         user_email = _resolve_user_email(request, payload)
+=======
+        # Prefer session cookie for authentication, fall back to header
+        cookie_token = request.cookies.get('trackeneer_session')
+        email_hdr = None
+        if cookie_token:
+            try:
+                db = get_mongo_db()
+                sess = db.sessions.find_one({'token': cookie_token})
+                if sess:
+                    # check expiry
+                    exp = sess.get('expiresAt')
+                    if exp:
+                        try:
+                            exp_dt = _parse_iso_to_dt(exp)
+                            if exp_dt and exp_dt < datetime.utcnow():
+                                # expired
+                                email_hdr = None
+                            else:
+                                email_hdr = sess.get('email')
+                        except Exception:
+                            email_hdr = sess.get('email')
+                    else:
+                        email_hdr = sess.get('email')
+            except Exception as e:
+                print(f"Warning: session lookup failed: {e}")
+
+        if not email_hdr:
+            email_hdr = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
         with driver.session() as session:
             ensure_user_and_day(session, user_email)
             rec = session.run("MATCH (u:User {email: $email}) RETURN u", email=user_email).single()
@@ -1421,6 +1528,23 @@ async def api_me(request: Request):
         print(f"Error in api_me: {e}")
         raise HTTPException(status_code=500, detail='Internal error')
 
+
+@app.get('/api/auth/exists')
+async def api_user_exists(email: str | None = None):
+    """Return whether a user with the given email exists in Mongo (fast check for OAuth flows)."""
+    try:
+        if not email:
+            raise HTTPException(status_code=400, detail='Missing email')
+        db = get_mongo_db()
+        users = db.users
+        exists = users.find_one({'email': email}) is not None
+        return {'exists': bool(exists)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in api_user_exists: {e}")
+        raise HTTPException(status_code=500, detail='Internal error')
+
 @app.post('/api/auth/signup')
 async def api_signup(request: Request):
     try:
@@ -1431,11 +1555,14 @@ async def api_signup(request: Request):
         if not name or not email or not password:
             raise HTTPException(status_code=400, detail='Missing fields')
 
+        # Persist user in MongoDB (for auth and basic profile)
         user_id = str(uuid.uuid4())
-        with driver.session() as session:
-            existing = session.run("MATCH (u:User {email: $email}) RETURN u", email=email).single()
-            if existing:
+        db = get_mongo_db()
+        try:
+            users = db.users
+            if users.find_one({'email': email}):
                 raise HTTPException(status_code=409, detail='User already exists')
+<<<<<<< HEAD
             session.run("""
                 CREATE (u:User {
                     id: $id, 
@@ -1447,16 +1574,225 @@ async def api_signup(request: Request):
             """, id=user_id, name=name, email=email, password=password)
             touch_user_login(session, email=email, name=name)
             ensure_user_and_day(session, email=email, name=name)
+=======
+>>>>>>> 39b4de53e8f106573bb98727e6ac9d714a7b7e08
 
-        return JSONResponse(status_code=201, content={
-            'message': 'User created',
-            'id': user_id
-        })
+            # simple sha256 hashing (replace with bcrypt for production)
+            pwd_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+            users.insert_one({
+                'id': user_id,
+                'name': name,
+                'email': email,
+                'password': pwd_hash,
+                'createdAt': datetime.utcnow().isoformat()
+            })
+        except PyMongoError as me:
+            print(f"MongoDB error: {me}")
+            raise HTTPException(status_code=500, detail='Could not save user')
+
+        # Create a Neo4j user node (and a profile node placeholder for career info)
+        try:
+            with driver.session() as session:
+                session.run(
+                    """
+                    CREATE (u:User {id:$id, name:$name, email:$email, createdAt: datetime()})
+                    CREATE (p:Profile {careerGoal: '', weaknesses: '', challenges: '', wantsHelp: ''})
+                    CREATE (u)-[:HAS_PROFILE]->(p)
+                    """,
+                    id=user_id, name=name, email=email,
+                )
+        except Exception as e:
+            print(f"Warning: could not create Neo4j user/profile: {e}")
+
+        return JSONResponse(status_code=201, content={'message': 'User created', 'id': user_id})
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error in api_signup: {e}")
         raise HTTPException(status_code=500, detail='Internal error')
+
+
+@app.post('/api/auth/register')
+async def api_register(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    branch: str = Form(...),
+    year: str = Form(...),
+    career_goal: str | None = Form(None),
+    weaknesses: str | None = Form(None),
+    challenges: str | None = Form(None),
+    wants_help: str | None = Form(None),
+    resume: UploadFile | None = File(None),
+):
+    """Full registration endpoint that:
+    - stores auth/basic profile in MongoDB
+    - stores career/profile info in Neo4j
+    - saves uploaded resume to local storage
+    """
+    try:
+        db = get_mongo_db()
+        users = db.users
+        if users.find_one({'email': email}):
+            raise HTTPException(status_code=409, detail='User already exists')
+
+        user_id = str(uuid.uuid4())
+        pwd_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+        users.insert_one({
+            'id': user_id,
+            'name': name,
+            'email': email,
+            'password': pwd_hash,
+            'branch': branch,
+            'year': year,
+            'createdAt': datetime.utcnow().isoformat(),
+        })
+
+        # Save resume if provided
+        stored_filename = None
+        if resume:
+            dest_dir = Path(os.path.join(os.path.dirname(__file__), 'uploads', 'resumes'))
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stored_filename = f"{user_id}_{resume.filename}"
+            dest_path = dest_dir / stored_filename
+            with open(dest_path, 'wb') as fh:
+                fh.write(await resume.read())
+            # update mongo record with resume info
+            users.update_one({'id': user_id}, {'$set': {'resume': {'filename': resume.filename, 'storedFilename': str(stored_filename)}}})
+
+        # Create or update Neo4j user and attach/update profile info (use MERGE on email to avoid duplicates)
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (u:User {email:$email})
+                ON CREATE SET u.id = $id, u.name = $name, u.createdAt = datetime()
+                MERGE (p:Profile {userEmail:$email})
+                SET p.careerGoal = $career_goal, p.weaknesses = $weaknesses, p.challenges = $challenges, p.wantsHelp = $wants_help
+                MERGE (u)-[:HAS_PROFILE]->(p)
+                """,
+                id=user_id, name=name, email=email,
+                career_goal=career_goal or '', weaknesses=weaknesses or '', challenges=challenges or '', wants_help=wants_help or '',
+            )
+
+        return JSONResponse(status_code=201, content={'message': 'User registered', 'id': user_id})
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in api_register: {e}")
+        raise HTTPException(status_code=500, detail='Registration failed')
+
+
+@app.post('/api/auth/oauth-register')
+async def api_oauth_register(
+    response: Response,
+    name: str = Form(...),
+    email: str = Form(...),
+    branch: str | None = Form(None),
+    year: str | None = Form(None),
+    career_goal: str | None = Form(None),
+    weaknesses: str | None = Form(None),
+    challenges: str | None = Form(None),
+    wants_help: str | None = Form(None),
+    resume: UploadFile | None = File(None),
+):
+    """Register an OAuth user after OAuth step. Password is auto-generated and stored as hash.
+    Fields from OAuth (name,email) are used; additional profile fields and resume are saved here.
+    """
+    try:
+        db = get_mongo_db()
+        users = db.users
+        existing = users.find_one({'email': email})
+        if existing:
+            # update profile info if provided (only set fields that are non-empty)
+            update_fields = {}
+            if branch:
+                update_fields['branch'] = branch
+            if year:
+                update_fields['year'] = year
+            if update_fields:
+                users.update_one({'email': email}, {'$set': update_fields})
+            user_id = existing['id']
+        else:
+            user_id = str(uuid.uuid4())
+            # generate a random password token and store its hash
+            token = uuid.uuid4().hex
+            pwd_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+            users.insert_one({
+                'id': user_id,
+                'name': name,
+                'email': email,
+                'password': pwd_hash,
+                'branch': branch or '',
+                'year': year or '',
+                'createdAt': datetime.utcnow().isoformat(),
+            })
+
+        # resume
+        stored_filename = None
+        if resume:
+            dest_dir = Path(os.path.join(os.path.dirname(__file__), 'uploads', 'resumes'))
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stored_filename = f"{user_id}_{resume.filename}"
+            dest_path = dest_dir / stored_filename
+            with open(dest_path, 'wb') as fh:
+                fh.write(await resume.read())
+            users.update_one({'id': user_id}, {'$set': {'resume': {'filename': resume.filename, 'storedFilename': str(stored_filename)}}})
+
+        # create or update neo4j profile
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (u:User {email:$email})
+                ON CREATE SET u.id = $id, u.name = $name, u.createdAt = datetime()
+                MERGE (p:Profile {userEmail:$email})
+                SET p.careerGoal = $career_goal, p.weaknesses = $weaknesses, p.challenges = $challenges, p.wantsHelp = $wants_help
+                MERGE (u)-[:HAS_PROFILE]->(p)
+                """,
+                id=user_id, name=name, email=email,
+                career_goal=career_goal or '', weaknesses=weaknesses or '', challenges=challenges or '', wants_help=wants_help or '',
+            )
+
+            # Create a server-side session and set an HttpOnly cookie so OAuth users
+            # are logged in immediately after completing the OAuth registration/flow.
+            try:
+                db = get_mongo_db()
+                sessions = db.sessions
+                token = uuid.uuid4().hex
+                expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+                sessions.insert_one({
+                    'token': token,
+                    'userId': user_id,
+                    'email': email,
+                    'createdAt': datetime.utcnow().isoformat(),
+                    'expiresAt': expires_at
+                })
+                response.set_cookie('trackeneer_session', token, httponly=True, samesite='lax', path='/', max_age=7*24*3600)
+            except Exception as e:
+                print(f"Warning: could not create server session for oauth user: {e}")
+
+            return JSONResponse(status_code=201, content={'message': 'OAuth user registered', 'id': user_id})
+    except Exception as e:
+        print(f"Error in api_oauth_register: {e}")
+        raise HTTPException(status_code=500, detail='OAuth registration failed')
+
+
+@app.post('/api/auth/logout')
+async def api_logout(request: Request, response: Response):
+    """Logout endpoint: removes server-side session and clears cookie."""
+    try:
+        cookie_token = request.cookies.get('trackeneer_session')
+        if cookie_token:
+            try:
+                db = get_mongo_db()
+                db.sessions.delete_many({'token': cookie_token})
+            except Exception as e:
+                print(f"Warning: could not delete session from DB: {e}")
+        # clear cookie
+        response.delete_cookie('trackeneer_session', path='/')
+        return {'message': 'Logged out'}
+    except Exception as e:
+        print(f"Error in api_logout: {e}")
+        raise HTTPException(status_code=500, detail='Logout failed')
 
 @app.post('/api/auth/forgot-password')
 async def api_forgot_password(request: Request):

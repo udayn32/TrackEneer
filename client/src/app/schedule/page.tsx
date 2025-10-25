@@ -437,6 +437,37 @@ const SchedulePage = () => {
     }
   };
 
+  // Allow manual refresh of Eisenhower data from the UI
+  const handleRefreshEisenhower = async () => {
+    setLoadingEisenhower(true);
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch(`${API_BASE}/api/schedule/eisenhower`),
+        fetch(`${API_BASE}/api/schedule/eisenhower/matrix`),
+      ]);
+      if (r1.ok) {
+        try {
+          const d1 = await r1.json();
+          setEisenhower(d1);
+        } catch (e) {
+          console.warn('Failed to parse eisenhower payload', e);
+        }
+      }
+      if (r2.ok) {
+        try {
+          const d2 = await r2.json();
+          setEisenhowerMatrix(d2);
+        } catch (e) {
+          console.warn('Failed to parse eisenhower matrix payload', e);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to refresh Eisenhower data', err);
+    } finally {
+      setLoadingEisenhower(false);
+    }
+  };
+
   const headlineDate = useMemo(() => formatLongDate(today), [today]);
 
   return (
@@ -599,6 +630,12 @@ const SchedulePage = () => {
                     onClick={() => { setShowEisenhowerModal(true); }}
                     className="px-3 py-1.5 text-xs font-bold text-white bg-yellow-500/20 border border-yellow-500/30 rounded-lg hover:bg-yellow-500/25 transition-all"
                   >View</button>
+                  <button
+                    onClick={handleRefreshEisenhower}
+                    disabled={loadingEisenhower}
+                    className="px-3 py-1.5 text-xs font-bold text-white bg-slate-800/40 border border-yellow-500/10 rounded-lg hover:bg-slate-800/50 transition-all disabled:opacity-50"
+                    title="Refresh Eisenhower matrix"
+                  >{loadingEisenhower ? '🔄 Refreshing…' : '🔄 Refresh'}</button>
                 </div>
               </div>
               <p className="text-xs text-slate-400 mb-4">Quick overview of prioritized tasks.</p>
