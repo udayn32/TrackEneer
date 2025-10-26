@@ -1,7 +1,7 @@
 import os
 import uuid
 import chromadb
-import requests
+import requests  # Re-added
 import aiohttp
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,16 +9,14 @@ from fastapi.responses import JSONResponse
 
 # huggingface_hub >= 0.16 removed `cached_download`, but sentence-transformers
 # still imports it. Provide a shim so newer versions remain compatible.
-import huggingface_hub  # type: ignore
-import hashlib
-from urllib.parse import urlparse
+import huggingface_hub  # Re-added
+import hashlib  # Re-added
+from urllib.parse import urlparse  # Re-added
 
 def _cached_download(url: str | None = None, cache_dir: str | None = None, force_download: bool = False, resume_download: bool = False, extract_compressed_file: bool = False, *args, **kwargs):
-    """Compatibility shim for `cached_download` expected by older libs.
-
-    - If `url` is provided, download it to a cache directory and return the local path.
-    - Otherwise, defer to `hf_hub_download` when available.
-    This keeps sentence-transformers working with newer huggingface_hub releases.
+    """
+    Compatibility shim for `cached_download` expected by older libs.
+    This is the full shim, restored to handle both URL and repo_id downloads.
     """
     # If a direct URL is provided, download and cache it.
     if url:
@@ -48,14 +46,25 @@ def _cached_download(url: str | None = None, cache_dir: str | None = None, force
     # Otherwise, try to delegate to hf_hub_download (newer API)
     try:
         from huggingface_hub import hf_hub_download
-        return hf_hub_download(*args, **kwargs)
+        
+        # Pass all relevant kwargs to the new function
+        all_kwargs = kwargs.copy()
+        all_kwargs.update({
+            'cache_dir': cache_dir,
+            'force_download': force_download,
+            'resume_download': resume_download,
+        })
+        
+        return hf_hub_download(*args, **all_kwargs)
     except Exception:
+        print("Failed to use hf_hub_download, falling back.")
         raise
 
 
 # Ensure the compatibility function is available under the old name
 if not hasattr(huggingface_hub, "cached_download"):
     huggingface_hub.cached_download = _cached_download  # type: ignore[attr-defined]
+
 
 from sentence_transformers import SentenceTransformer
 from datetime import datetime, timedelta, timezone
@@ -77,7 +86,6 @@ from typing import Optional
 
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
-
 # --- 1. FastAPI App Initialization ---
 app = FastAPI()
 
@@ -148,7 +156,7 @@ label_prototypes = {}
 nlp = None
 
 PREFER_SKIP = os.getenv('SKIP_MODEL_LOAD', '0') == '1'
-EMBED_MODEL = os.getenv('EMBED_MODEL') or 'sentence-transformers/all-mpnet-base-v2'
+EMBED_MODEL = os.getenv('EMBED_MODEL') or './all-MiniLM-L6-v2'
 CLASSIFIER_MODEL = os.getenv('CLASSIFIER_MODEL')
 
 if PREFER_SKIP:
@@ -159,10 +167,25 @@ else:
         print(f"Loaded embedding model: {EMBED_MODEL}")
     except Exception as e:
         print(f"Could not load embedding model {EMBED_MODEL}: {e}")
-        raise RuntimeError("Failed to load embedding model.")
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"Failed to load embedding model {EMBED_MODEL}: {e}")
 
     if CLASSIFIER_MODEL:
         try:
+            # --- START: Cache clearing logic for classifier ---
+            try:
+                default_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "torch", "sentence_transformers")
+                model_cache_path = os.path.join(default_cache_dir, CLASSIFIER_MODEL.replace("/", "_")) # Use safe name
+                
+                if os.path.exists(model_cache_path):
+                    print(f"Corrupt model cache detected. Attempting to remove: {model_cache_path}")
+                    shutil.rmtree(model_cache_path)
+                    print("Cache removed successfully.")
+            except Exception as e:
+                print(f"Warning: Could not remove cached model directory: {e}")
+            # --- END: Cache clearing logic for classifier ---
+
             classifier_model = SentenceTransformer(CLASSIFIER_MODEL)
             print(f"Loaded classifier model: {CLASSIFIER_MODEL}")
         except Exception as e:
@@ -472,16 +495,16 @@ async def add_task(request: Request):
                 })
                 MERGE (d)-[:HAS_TASK]->(t)
             """,
-                task_date=task_day_iso,
-                id=task_id, 
-                title=data['title'],
-                description=data['description'], 
-                start_time=start_dt_ist, 
-                end_time=end_dt_ist, 
-                due_date=due_datetime_to_store,
-                email=user_email,
-                user_name=user_name,
-                **ai_analysis)
+            task_date=task_day_iso,
+            id=task_id, 
+            title=data['title'],
+            description=data['description'], 
+            start_time=start_dt_ist, 
+            end_time=end_dt_ist, 
+            due_date=due_datetime_to_store,
+            email=user_email,
+            user_name=user_name,
+            **ai_analysis)
 
         # Add embedding to vector DB
         try:
@@ -1796,7 +1819,7 @@ async def api_forgot_password(request: Request):
         with driver.session() as session:
             session.run("""
                 MERGE (u:User {email: $email})
-                  ON CREATE SET u.id = randomUUID(), u.createdAt = datetime()
+                    ON CREATE SET u.id = randomUUID(), u.createdAt = datetime()
             """, email=email)
             touch_user_login(session, email=email)
             ensure_user_and_day(session, email=email)
@@ -2139,3 +2162,10 @@ if __name__ == '__main__':
         uvicorn.run(app, host='0.0.0.0', port=5000, log_level='info')
     except Exception:
         uvicorn.run(app, host='0.0.0.0', port=5000, log_level='info')
+
+
+
+
+
+
+
