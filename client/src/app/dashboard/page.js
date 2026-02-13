@@ -63,10 +63,10 @@ const Header = () => {
 
     fetchQuote();
   }, []);
-  
+
   return (
     <header className="bg-gradient-to-r from-cyan-500 via-blue-500 to-purple-500 text-white p-6 rounded-xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl shadow-cyan-500/20">
-      
+
       {/* Left side: Welcome */}
       <div className="flex items-center gap-4">
         <h1 className="text-3xl font-bold">Welcome, {session?.user?.name || 'User'}</h1>
@@ -107,7 +107,7 @@ const NextTask = () => {
         const response = await fetch(`${API_BASE}/api/upcoming-deadlines`);
         if (!response.ok) throw new Error("Failed to fetch tasks");
         const data = await response.json();
-        
+
         // Get deadlines array and take first 3 tasks
         const deadlines = Array.isArray(data.deadlines) ? data.deadlines : [];
         setTasks(deadlines.slice(0, 3));
@@ -128,19 +128,19 @@ const NextTask = () => {
     const today = new Date();
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
-    
+
     const dateStr = date.toDateString();
     const todayStr = today.toDateString();
     const tomorrowStr = tomorrow.toDateString();
-    
+
     if (dateStr === todayStr) return "Today";
     if (dateStr === tomorrowStr) return "Tomorrow";
-    
+
     const diffTime = date - today;
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
+
     if (diffDays > 0 && diffDays <= 7) return `in ${diffDays} days`;
-    
+
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
@@ -150,7 +150,7 @@ const NextTask = () => {
         <span className="mr-2">📋</span>
         Next Tasks
       </h2>
-      
+
       {/* Tasks List */}
       <div className="bg-slate-900/50 backdrop-blur-sm rounded-lg p-4 mb-6 space-y-3 min-h-[200px] border border-cyan-500/10">
         {loading ? (
@@ -166,11 +166,10 @@ const NextTask = () => {
                   </p>
                 </div>
                 {task.priority && (
-                  <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
-                    task.priority === 'High' ? 'bg-gradient-to-r from-red-500 to-pink-500 text-white' :
-                    task.priority === 'Medium' ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white' :
-                    'bg-gradient-to-r from-green-500 to-emerald-500 text-white'
-                  }`}>
+                  <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${task.priority === 'High' ? 'bg-gradient-to-r from-red-500 to-pink-500 text-white' :
+                      task.priority === 'Medium' ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white' :
+                        'bg-gradient-to-r from-green-500 to-emerald-500 text-white'
+                    }`}>
                     {task.priority}
                   </span>
                 )}
@@ -184,7 +183,7 @@ const NextTask = () => {
           </div>
         )}
       </div>
-      
+
       <a href="/schedule" className="block w-full bg-gradient-to-r from-cyan-400 to-blue-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 hover:scale-105 text-center font-semibold">
         Go to Schedule →
       </a>
@@ -200,7 +199,7 @@ const RecentFiles = () => {
         <span className="mr-2">📁</span>
         Recent Files
       </h2>
-      
+
       <div className="bg-slate-900/50 backdrop-blur-sm rounded-lg p-4 mb-6 border border-purple-500/10">
         <ul className='space-y-3'>
           <li className='bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 rounded-lg text-white font-medium border border-purple-500/20 hover:border-purple-400/40 hover:shadow-lg hover:shadow-purple-500/20 transition-all duration-300 flex items-center'>
@@ -217,7 +216,7 @@ const RecentFiles = () => {
           </li>
         </ul>
       </div>
-      
+
       <a href="/study" className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 hover:scale-105 font-semibold">
         Go to Study →
       </a>
@@ -259,6 +258,38 @@ const QuickAccessModules = () => {
       link: '/insights',
       gradient: 'from-emerald-500 to-teal-500',
       hoverShadow: 'hover:shadow-emerald-500/30'
+    },
+    {
+      name: 'Knowledge Graph',
+      icon: '🧠',
+      description: 'Visualize concept maps & prerequisites',
+      link: '/knowledge-graph',
+      gradient: 'from-violet-500 to-fuchsia-500',
+      hoverShadow: 'hover:shadow-violet-500/30'
+    },
+    {
+      name: 'AI Mentor',
+      icon: '🎓',
+      description: 'Socratic tutoring powered by your notes',
+      link: '/mentor',
+      gradient: 'from-amber-500 to-orange-500',
+      hoverShadow: 'hover:shadow-amber-500/30'
+    },
+    {
+      name: 'Mastery Tracker',
+      icon: '📊',
+      description: 'Track learning progress & take quizzes',
+      link: '/knowledge-tracing',
+      gradient: 'from-rose-500 to-red-500',
+      hoverShadow: 'hover:shadow-rose-500/30'
+    },
+    {
+      name: 'Career Readiness',
+      icon: '🚀',
+      description: 'Skill mapping & placement prediction',
+      link: '/career',
+      gradient: 'from-teal-500 to-cyan-500',
+      hoverShadow: 'hover:shadow-teal-500/30'
     }
   ];
 
@@ -268,7 +299,7 @@ const QuickAccessModules = () => {
         <span className="mr-2">🚀</span>
         Quick Access
       </h2>
-      
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {modules.map((module, index) => (
           <a
@@ -297,15 +328,15 @@ export default function DashboardPage() {
         <div className="absolute top-0 left-0 w-[600px] h-[600px] bg-gradient-to-br from-cyan-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
         <div className="absolute bottom-0 right-0 w-[700px] h-[700px] bg-gradient-to-tl from-purple-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
       </div>
-      
+
       <div className="relative z-10">
         <Header />
-        
+
         {/* Quick Access Modules */}
         <div className="mt-8">
           <QuickAccessModules />
         </div>
-        
+
         {/* Tasks and Files */}
         <div className="mt-8 flex gap-8 flex-col lg:flex-row">
           <NextTask />

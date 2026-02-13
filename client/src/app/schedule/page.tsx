@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { useSession } from "next-auth/react";
 import Image from "next/image";
+import { TimetableComponent } from "@/components/Schedule/TimetableComponent";
 
 const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
 
@@ -112,6 +113,7 @@ const SchedulePage = () => {
   const [error, setError] = useState<string | null>(null);
   const [openForm, setOpenForm] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [form, setForm] = useState({
     title: "",
     description: "",
@@ -119,6 +121,8 @@ const SchedulePage = () => {
     endTime: "",
     dueDate: "",
   });
+
+  const [activeMainTab, setActiveMainTab] = useState<"daily" | "timetable">("daily");
 
   const today = useMemo(() => new Date(), []);
 
@@ -203,7 +207,7 @@ const SchedulePage = () => {
     const fetchEisenhower = async () => {
       try {
         setLoadingEisenhower(true);
-        const res = await fetch(`${API_BASE}/api/schedule/eisenhower` , { signal: controller.signal });
+        const res = await fetch(`${API_BASE}/api/schedule/eisenhower`, { signal: controller.signal });
         if (!res.ok) throw new Error('Failed to fetch eisenhower');
         const data = await res.json();
         setEisenhower(data);
@@ -230,8 +234,8 @@ const SchedulePage = () => {
     fetchDeadlines();
     fetchRecommendations();
     fetchPendingNotifications();
-  fetchEisenhower();
-  fetchEisenhowerMatrix();
+    fetchEisenhower();
+    fetchEisenhowerMatrix();
 
     return () => controller.abort();
   }, [today]);
@@ -265,7 +269,7 @@ const SchedulePage = () => {
           label = `Notification received (${data.type ?? "update"})`;
         }
 
-  const idBase = data.task?.id ? `${data.task.id}-${data.type ?? "event"}` : `${data.type}-${ts}`;
+        const idBase = data.task?.id ? `${data.task.id}-${data.type ?? "event"}` : `${data.type}-${ts}`;
         setNotifications((prev) => {
           const exists = prev.find((item) => item.id === idBase);
           const next = [
@@ -389,6 +393,22 @@ const SchedulePage = () => {
 
   const resetForm = () => {
     setForm({ title: "", description: "", startTime: "", endTime: "", dueDate: "" });
+    setEditingTaskId(null);
+  };
+
+  const handleEdit = (task: any) => {
+    setForm({
+      title: task.title || "",
+      description: task.description || "",
+      startTime: task.startTime ? new Date(task.startTime).toISOString().slice(0, 16) : "",
+      endTime: task.endTime ? new Date(task.endTime).toISOString().slice(0, 16) : "",
+      dueDate: task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 16) : task.deadline ? new Date(task.deadline).toISOString().slice(0, 16) : "",
+    });
+    setEditingTaskId(task.id);
+    setOpenForm(true);
+    // If opening from eisenhower modal, we might want to close it or keep it open?
+    // Let's close it so the form is visible
+    setShowEisenhowerModal(false);
   };
 
   const handleSubmit = async (event: FormEvent) => {
@@ -405,17 +425,26 @@ const SchedulePage = () => {
     };
 
     try {
-      const response = await fetch(`${API_BASE}/api/add-task`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      let response;
+      if (editingTaskId) {
+        response = await fetch(`${API_BASE}/api/tasks/${editingTaskId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        response = await fetch(`${API_BASE}/api/add-task`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
 
-      if (!response.ok) throw new Error("Failed to add task");
+      if (!response.ok) throw new Error(editingTaskId ? "Failed to update task" : "Failed to add task");
 
       setOpenForm(false);
       resetForm();
-      // Refresh tasks and deadlines to keep UI in sync without waiting for next effect run.
+      // Refresh all data
       Promise.all([
         fetch(`${API_BASE}/api/schedule?date=${today.toISOString().split("T")[0]}`)
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to refresh tasks"))))
@@ -429,9 +458,12 @@ const SchedulePage = () => {
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to refresh notifications"))))
           .then((data) => setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []))
           .catch(() => undefined),
+        // Also refresh Eisenhower if we edited something
+        fetch(`${API_BASE}/api/schedule/eisenhower`).then(r => r.json()).then(d => setEisenhower(d)).catch(() => undefined),
+        fetch(`${API_BASE}/api/schedule/eisenhower/matrix`).then(r => r.json()).then(d => setEisenhowerMatrix(d)).catch(() => undefined)
       ]);
     } catch (err) {
-      setError((err as Error).message || "Failed to add task");
+      setError((err as Error).message || "Failed to save task");
     } finally {
       setAdding(false);
     }
@@ -477,7 +509,7 @@ const SchedulePage = () => {
         <div className="absolute top-0 left-0 w-[600px] h-[600px] bg-gradient-to-br from-cyan-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
         <div className="absolute bottom-0 right-0 w-[700px] h-[700px] bg-gradient-to-tl from-purple-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
       </div>
-      
+
       <aside className="w-64 bg-gradient-to-b from-slate-900/80 via-slate-800/80 to-slate-900/80 backdrop-blur-sm flex flex-col justify-between py-8 px-6 shadow-2xl border-r border-cyan-500/10 relative z-10">
         <div>
           <div className="mb-12">
@@ -485,10 +517,22 @@ const SchedulePage = () => {
             <p className="text-xs text-slate-400 mt-1">Smart Task Scheduler</p>
           </div>
           <nav className="space-y-3">
+            <button
+              onClick={() => setActiveMainTab("daily")}
+              className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 font-medium text-sm ${activeMainTab === "daily" ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/20" : "text-slate-300 hover:bg-slate-700 hover:text-cyan-400"}`}
+            >
+              <span className="mr-2">📅</span>Daily Schedule
+            </button>
+            <button
+              onClick={() => setActiveMainTab("timetable")}
+              className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 font-medium text-sm ${activeMainTab === "timetable" ? "bg-purple-500/20 text-purple-400 border border-purple-500/20" : "text-slate-300 hover:bg-slate-700 hover:text-purple-400"}`}
+            >
+              <span className="mr-2">📚</span>Timetable & Syllabus
+            </button>
             {[
-              { label: "Study", icon: "📚",path:"/study" },
-              { label: "Placcement", icon: "🎯",path:"/placement" },
-              { label: "Insight", icon: "💡",path:"/insights" },
+              { label: "Study", icon: "📖", path: "/study" },
+              { label: "Placement", icon: "🎯", path: "/placement" },
+              { label: "Insights", icon: "💡", path: "/insights" },
             ].map((item) => (
               <button key={item.label} className="w-full text-left px-4 py-3 rounded-lg text-slate-300 hover:bg-slate-700 hover:text-cyan-400 transition-all duration-200 font-medium text-sm">
                 <span className="mr-2">{item.icon}</span>{item.label}
@@ -503,9 +547,11 @@ const SchedulePage = () => {
         <header className="bg-slate-900/80 backdrop-blur-md border-b border-cyan-500/20 px-8 py-6 shadow-lg shadow-cyan-500/5">
           <div className="flex justify-between items-start mb-4">
             <div>
-              <h2 className="text-4xl font-black bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 bg-clip-text text-transparent">Schedule</h2>
+              <h2 className="text-4xl font-black bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 bg-clip-text text-transparent">
+                {activeMainTab === "daily" ? "Schedule" : "Timetable & Documents"}
+              </h2>
               <p className="text-slate-400 text-sm mt-1 font-medium">{headlineDate}</p>
-              {quote && (
+              {activeMainTab === "daily" && quote && (
                 <p className="mt-3 max-w-2xl italic text-slate-300 text-sm leading-relaxed">
                   <span className="text-cyan-400">✨</span> "{quote.content}"{quote.author ? ` — ${quote.author}` : ""}
                 </p>
@@ -531,223 +577,235 @@ const SchedulePage = () => {
         </header>
 
         <div className="flex-1 overflow-y-auto px-8 py-6">
-          {error && (
-            <div className="mb-6 rounded-lg bg-red-500/20 border border-red-500/40 px-4 py-3 text-sm text-red-400 shadow-sm">
-              <span className="font-semibold">⚠️ Error:</span> {error}
-            </div>
-          )}
+          {activeMainTab === "daily" ? (
+            <>
+              {error && (
+                <div className="mb-6 rounded-lg bg-red-500/20 border border-red-500/40 px-4 py-3 text-sm text-red-400 shadow-sm">
+                  <span className="font-semibold">⚠️ Error:</span> {error}
+                </div>
+              )}
 
-          <div className="grid gap-6 grid-cols-1 lg:grid-cols-3 mb-6">
-            {/* Tasks Card */}
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-cyan-500/20 hover:shadow-cyan-500/20 transition-all duration-300 group">
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-extrabold text-white flex items-center">
-                  <span className="mr-3 text-2xl">📋</span>Your Tasks
-                </h3>
-                <button
-                  onClick={() => setOpenForm(true)}
-                  className="px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-500 via-blue-500 to-blue-600 rounded-xl hover:shadow-xl hover:shadow-cyan-500/30 hover:scale-110 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
-                >
-                  + Add
-                </button>
-              </div>
-              <ul className="space-y-3 text-sm max-h-96 overflow-y-auto pr-1 custom-scrollbar">
-                {loading.tasks ? (
-                  <li className="text-slate-400 py-4 text-center">⏳ Loading tasks…</li>
-                ) : tasks.length === 0 ? (
-                  <li className="text-slate-500 py-8 text-center text-sm">📭 No tasks scheduled for today.</li>
-                ) : (
-                  tasks.map((task) => (
-                    <li key={task.id || task.title} className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-cyan-500/20 hover:border-cyan-400/60 hover:shadow-lg hover:shadow-cyan-500/10 transition-all duration-200 cursor-pointer group/item">
-                      <p className="font-bold text-white text-base mb-1 group-hover/item:text-cyan-400 transition-colors">{task.title || "Untitled"}</p>
-                      {task.description && <p className="text-xs text-slate-400 mt-1 line-clamp-2">{task.description}</p>}
-                      <div className="mt-3 flex gap-4 text-xs text-slate-400 font-semibold">
-                        {task.startTime && <span className="flex items-center gap-1"><span className="text-sm">🕐</span> {formatToIST(task.startTime)}</span>}
-                        {task.endTime && <span className="flex items-center gap-1"><span className="text-sm">⏱️</span> {formatToIST(task.endTime)}</span>}
-                      </div>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
-
-            {/* Recommendations Card */}
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-blue-500/20 hover:shadow-blue-500/20 transition-all duration-300 group">
-              <h3 className="text-xl font-extrabold text-white mb-4 flex items-center">
-                <span className="mr-3 text-2xl">💡</span>Recommendations
-              </h3>
-              <p className="text-xs text-slate-400 mb-5 font-medium">Based on study & career data.</p>
-              <div className="flex flex-wrap gap-2.5 max-h-96 overflow-y-auto custom-scrollbar">
-                {loading.recs ? (
-                  <p className="text-slate-400 text-sm py-4 w-full text-center">⏳ Loading…</p>
-                ) : recommendations.length === 0 ? (
-                  <p className="text-slate-500 text-sm py-8 w-full text-center">📭 No recommendations available.</p>
-                ) : (
-                  recommendations.map((rec, idx) => (
+              <div className="grid gap-6 grid-cols-1 lg:grid-cols-3 mb-6">
+                {/* Tasks Card */}
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-cyan-500/20 hover:shadow-cyan-500/20 transition-all duration-300 group">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-xl font-extrabold text-white flex items-center">
+                      <span className="mr-3 text-2xl">📋</span>Your Tasks
+                    </h3>
                     <button
-                      key={rec.taskId ? `${rec.taskId}-${rec.label}` : `${rec.label}-${idx}`}
-                      className="rounded-xl bg-gradient-to-r from-blue-500/20 via-cyan-500/20 to-blue-500/20 px-4 py-2.5 text-xs font-bold text-blue-300 border border-blue-500/40 hover:border-blue-400 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-105 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
-                      title={rec.type ? `${rec.type} • ${rec.estimate_minutes ?? 0} min` : undefined}
+                      onClick={() => setOpenForm(true)}
+                      className="px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-500 via-blue-500 to-blue-600 rounded-xl hover:shadow-xl hover:shadow-cyan-500/30 hover:scale-110 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
                     >
-                      {rec.label}
+                      + Add
                     </button>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Deadlines Card */}
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-purple-500/20 hover:shadow-purple-500/20 transition-all duration-300 group">
-              <h3 className="text-xl font-extrabold text-white mb-6 flex items-center">
-                <span className="mr-3 text-2xl">📅</span>Upcoming Deadlines
-              </h3>
-              <ul className="space-y-3 text-sm max-h-96 overflow-y-auto pr-1 custom-scrollbar">
-                {loading.deadlines ? (
-                  <li className="text-slate-400 py-4 text-center">⏳ Loading deadlines…</li>
-                ) : deadlines.length === 0 ? (
-                  <li className="text-slate-500 py-8 text-center text-sm">✅ No upcoming deadlines.</li>
-                ) : (
-                  deadlines.map((deadline) => (
-                    <li key={`${deadline.title}-${deadline.dueDate}`} className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200 cursor-pointer group/item">
-                      <p className="font-bold text-white text-base mb-2 group-hover/item:text-purple-400 transition-colors">{deadline.title || "Untitled"}</p>
-                      <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
-                        <span className="text-sm">📌</span> {formatDueDate(deadline.dueDate)}
-                      </p>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
-
-            {/* Eisenhower Matrix Card */}
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-yellow-500/20 hover:shadow-yellow-500/20 transition-all duration-300 group col-span-full lg:col-auto">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-extrabold text-white flex items-center">
-                  <span className="mr-3 text-2xl">🧭</span>Eisenhower Matrix
-                </h3>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => { setShowEisenhowerModal(true); }}
-                    className="px-3 py-1.5 text-xs font-bold text-white bg-yellow-500/20 border border-yellow-500/30 rounded-lg hover:bg-yellow-500/25 transition-all"
-                  >View</button>
-                  <button
-                    onClick={handleRefreshEisenhower}
-                    disabled={loadingEisenhower}
-                    className="px-3 py-1.5 text-xs font-bold text-white bg-slate-800/40 border border-yellow-500/10 rounded-lg hover:bg-slate-800/50 transition-all disabled:opacity-50"
-                    title="Refresh Eisenhower matrix"
-                  >{loadingEisenhower ? '🔄 Refreshing…' : '🔄 Refresh'}</button>
+                  </div>
+                  <ul className="space-y-3 text-sm max-h-96 overflow-y-auto pr-1 custom-scrollbar">
+                    {loading.tasks ? (
+                      <li className="text-slate-400 py-4 text-center">⏳ Loading tasks…</li>
+                    ) : tasks.length === 0 ? (
+                      <li className="text-slate-500 py-8 text-center text-sm">📭 No tasks scheduled for today.</li>
+                    ) : (
+                      tasks.map((task) => (
+                        <li
+                          key={task.id || task.title}
+                          onClick={() => handleEdit(task)}
+                          className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-cyan-500/20 hover:border-cyan-400/60 hover:shadow-lg hover:shadow-cyan-500/10 transition-all duration-200 cursor-pointer group/item"
+                        >
+                          <p className="font-bold text-white text-base mb-1 group-hover/item:text-cyan-400 transition-colors">{task.title || "Untitled"}</p>
+                          {task.description && <p className="text-xs text-slate-400 mt-1 line-clamp-2">{task.description}</p>}
+                          <div className="mt-3 flex gap-4 text-xs text-slate-400 font-semibold">
+                            {task.startTime && <span className="flex items-center gap-1"><span className="text-sm">🕐</span> {formatToIST(task.startTime)}</span>}
+                            {task.endTime && <span className="flex items-center gap-1"><span className="text-sm">⏱️</span> {formatToIST(task.endTime)}</span>}
+                          </div>
+                        </li>
+                      ))
+                    )}
+                  </ul>
                 </div>
-              </div>
-              <p className="text-xs text-slate-400 mb-4">Quick overview of prioritized tasks.</p>
-              {loadingEisenhower ? (
-                <p className="text-slate-400 text-sm">⏳ Loading…</p>
-              ) : (!eisenhowerMatrix || !eisenhowerMatrix.matrix) ? (
-                <p className="text-slate-500 text-sm">No matrix data available.</p>
-              ) : (
-                <div className="grid grid-cols-2 gap-3">
-                  {Object.entries(eisenhowerMatrix.matrix as any).map(([k, v]: [string, any]) => (
-                    <div key={k} className="rounded-lg bg-slate-800/60 p-3 border border-yellow-500/10">
-                      <p className="text-xs text-slate-300 font-semibold">{k}</p>
-                      <p className="text-2xl font-black text-white mt-2">{v.count}</p>
-                      <div className="mt-3 text-xs text-slate-400">
-                        {v.tasks && v.tasks.length > 0 ? v.tasks.map((t: any) => (
-                          <div key={t.id} className="mb-1">• {t.title}</div>
-                        )) : <div className="text-slate-500">—</div>}
-                      </div>
+
+                {/* Recommendations Card */}
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-blue-500/20 hover:shadow-blue-500/20 transition-all duration-300 group">
+                  <h3 className="text-xl font-extrabold text-white mb-4 flex items-center">
+                    <span className="mr-3 text-2xl">💡</span>Recommendations
+                  </h3>
+                  <p className="text-xs text-slate-400 mb-5 font-medium">Based on study & career data.</p>
+                  <div className="flex flex-wrap gap-2.5 max-h-96 overflow-y-auto custom-scrollbar">
+                    {loading.recs ? (
+                      <p className="text-slate-400 text-sm py-4 w-full text-center">⏳ Loading…</p>
+                    ) : recommendations.length === 0 ? (
+                      <p className="text-slate-500 text-sm py-8 w-full text-center">📭 No recommendations available.</p>
+                    ) : (
+                      recommendations.map((rec, idx) => (
+                        <button
+                          key={rec.taskId ? `${rec.taskId}-${rec.label}` : `${rec.label}-${idx}`}
+                          className="rounded-xl bg-gradient-to-r from-blue-500/20 via-cyan-500/20 to-blue-500/20 px-4 py-2.5 text-xs font-bold text-blue-300 border border-blue-500/40 hover:border-blue-400 hover:shadow-lg hover:shadow-blue-500/20 hover:scale-105 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
+                          title={rec.type ? `${rec.type} • ${rec.estimate_minutes ?? 0} min` : undefined}
+                        >
+                          {rec.label}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Deadlines Card */}
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-purple-500/20 hover:shadow-purple-500/20 transition-all duration-300 group">
+                  <h3 className="text-xl font-extrabold text-white mb-6 flex items-center">
+                    <span className="mr-3 text-2xl">📅</span>Upcoming Deadlines
+                  </h3>
+                  <ul className="space-y-3 text-sm max-h-96 overflow-y-auto pr-1 custom-scrollbar">
+                    {loading.deadlines ? (
+                      <li className="text-slate-400 py-4 text-center">⏳ Loading deadlines…</li>
+                    ) : deadlines.length === 0 ? (
+                      <li className="text-slate-500 py-8 text-center text-sm">✅ No upcoming deadlines.</li>
+                    ) : (
+                      deadlines.map((deadline) => (
+                        <li key={`${deadline.title}-${deadline.dueDate}`} className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200 cursor-pointer group/item">
+                          <p className="font-bold text-white text-base mb-2 group-hover/item:text-purple-400 transition-colors">{deadline.title || "Untitled"}</p>
+                          <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
+                            <span className="text-sm">📌</span> {formatDueDate(deadline.dueDate)}
+                          </p>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </div>
+
+                {/* Eisenhower Matrix Card */}
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-yellow-500/20 hover:shadow-yellow-500/20 transition-all duration-300 group col-span-full lg:col-auto">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-xl font-extrabold text-white flex items-center">
+                      <span className="mr-3 text-2xl">🧭</span>Eisenhower Matrix
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => { setShowEisenhowerModal(true); }}
+                        className="px-3 py-1.5 text-xs font-bold text-white bg-yellow-500/20 border border-yellow-500/30 rounded-lg hover:bg-yellow-500/25 transition-all"
+                      >View</button>
+                      <button
+                        onClick={handleRefreshEisenhower}
+                        disabled={loadingEisenhower}
+                        className="px-3 py-1.5 text-xs font-bold text-white bg-slate-800/40 border border-yellow-500/10 rounded-lg hover:bg-slate-800/50 transition-all disabled:opacity-50"
+                        title="Refresh Eisenhower matrix"
+                      >{loadingEisenhower ? '🔄 Refreshing…' : '🔄 Refresh'}</button>
                     </div>
-                  ))}
+                  </div>
+                  <p className="text-xs text-slate-400 mb-4">Quick overview of prioritized tasks.</p>
+                  {loadingEisenhower ? (
+                    <p className="text-slate-400 text-sm">⏳ Loading…</p>
+                  ) : (!eisenhowerMatrix || !eisenhowerMatrix.matrix) ? (
+                    <p className="text-slate-500 text-sm">No matrix data available.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(eisenhowerMatrix.matrix as any).map(([k, v]: [string, any]) => (
+                        <div key={k} className="rounded-lg bg-slate-800/60 p-3 border border-yellow-500/10">
+                          <p className="text-xs text-slate-300 font-semibold">{k}</p>
+                          <p className="text-2xl font-black text-white mt-2">{v.count}</p>
+                          <div className="mt-3 text-xs text-slate-400">
+                            {v.tasks && v.tasks.length > 0 ? v.tasks.map((t: any) => (
+                              <div key={t.id} className="mb-1">• {t.title}</div>
+                            )) : <div className="text-slate-500">—</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* Live Notifications & Pending Notifications */}
-          <div className="grid gap-6 lg:grid-cols-2 mb-6">
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-cyan-500/20 hover:shadow-cyan-500/20 transition-all duration-300 group">
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-extrabold text-white flex items-center">
-                  <span className="mr-3 text-2xl">🔔</span>Live Notifications
-                </h3>
-                <span className={`text-xs px-3 py-1.5 rounded-full font-bold shadow-sm ${wsStatus === "open" ? "bg-green-500/20 text-green-400 border border-green-500/40" : "bg-red-500/20 text-red-400 border border-red-500/40"}`}>
-                  {wsStatus === "open" ? "🟢 Connected" : "🔴 Offline"}
-                </span>
               </div>
-              <ul className="space-y-3 text-sm max-h-72 overflow-y-auto pr-1 custom-scrollbar">
-                {notifications.length === 0 ? (
-                  <li className="text-slate-500 py-8 text-center">🌀 No live notifications yet.</li>
-                ) : (
-                  notifications.map((item) => (
-                    <li key={item.id} className="rounded-xl bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 border border-cyan-500/20 hover:border-cyan-400/60 hover:shadow-lg hover:shadow-cyan-500/10 transition-all duration-200 cursor-pointer group/item animate-fade-in">
-                      <p className="font-bold text-white text-sm mb-2 group-hover/item:text-cyan-400 transition-colors">{item.label}</p>
-                      <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
-                        <span className="text-sm">🕐</span> {new Date(item.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
-                      </p>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
 
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-purple-500/20 hover:shadow-purple-500/20 transition-all duration-300 group">
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-extrabold text-white flex items-center">
-                  <span className="mr-3 text-2xl">⏰</span>Next 15 Minutes
-                </h3>
-                <button
-                  onClick={async () => {
-                    setLoading((prev) => ({ ...prev, pending: true }));
-                    try {
-                      const response = await fetch(`${API_BASE}/api/notifications/pending`);
-                      if (!response.ok) throw new Error("Failed to fetch notifications");
-                      const data = await response.json();
-                      setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []);
-                      setNotifError(null);
-                    } catch (err) {
-                      setNotifError((err as Error).message || "Failed to fetch notifications");
-                    } finally {
-                      setLoading((prev) => ({ ...prev, pending: false }));
-                    }
-                  }}
-                  className="px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-500 via-blue-500 to-blue-600 rounded-xl hover:shadow-xl hover:shadow-cyan-500/30 hover:scale-110 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
-                >
-                  🔄 Refresh
-                </button>
+              {/* Live Notifications & Pending Notifications */}
+              <div className="grid gap-6 lg:grid-cols-2 mb-6">
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-cyan-500/20 hover:shadow-cyan-500/20 transition-all duration-300 group">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-xl font-extrabold text-white flex items-center">
+                      <span className="mr-3 text-2xl">🔔</span>Live Notifications
+                    </h3>
+                    <span className={`text-xs px-3 py-1.5 rounded-full font-bold shadow-sm ${wsStatus === "open" ? "bg-green-500/20 text-green-400 border border-green-500/40" : "bg-red-500/20 text-red-400 border border-red-500/40"}`}>
+                      {wsStatus === "open" ? "🟢 Connected" : "🔴 Offline"}
+                    </span>
+                  </div>
+                  <ul className="space-y-3 text-sm max-h-72 overflow-y-auto pr-1 custom-scrollbar">
+                    {notifications.length === 0 ? (
+                      <li className="text-slate-500 py-8 text-center">🌀 No live notifications yet.</li>
+                    ) : (
+                      notifications.map((item) => (
+                        <li key={item.id} className="rounded-xl bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 border border-cyan-500/20 hover:border-cyan-400/60 hover:shadow-lg hover:shadow-cyan-500/10 transition-all duration-200 cursor-pointer group/item animate-fade-in">
+                          <p className="font-bold text-white text-sm mb-2 group-hover/item:text-cyan-400 transition-colors">{item.label}</p>
+                          <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
+                            <span className="text-sm">🕐</span> {new Date(item.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                          </p>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </div>
+
+                <div className="rounded-2xl bg-slate-900/80 backdrop-blur-sm p-6 shadow-2xl border border-purple-500/20 hover:shadow-purple-500/20 transition-all duration-300 group">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-xl font-extrabold text-white flex items-center">
+                      <span className="mr-3 text-2xl">⏰</span>Next 15 Minutes
+                    </h3>
+                    <button
+                      onClick={async () => {
+                        setLoading((prev) => ({ ...prev, pending: true }));
+                        try {
+                          const response = await fetch(`${API_BASE}/api/notifications/pending`);
+                          if (!response.ok) throw new Error("Failed to fetch notifications");
+                          const data = await response.json();
+                          setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []);
+                          setNotifError(null);
+                        } catch (err) {
+                          setNotifError((err as Error).message || "Failed to fetch notifications");
+                        } finally {
+                          setLoading((prev) => ({ ...prev, pending: false }));
+                        }
+                      }}
+                      className="px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-500 via-blue-500 to-blue-600 rounded-xl hover:shadow-xl hover:shadow-cyan-500/30 hover:scale-110 hover:-translate-y-0.5 transition-all duration-200 active:scale-95"
+                    >
+                      🔄 Refresh
+                    </button>
+                  </div>
+                  {notifError && (
+                    <p className="mb-4 rounded-xl bg-red-500/20 border border-red-500/40 px-4 py-3 text-xs text-red-400 font-semibold shadow-sm">⚠️ {notifError}</p>
+                  )}
+                  <ul className="space-y-3 text-sm max-h-72 overflow-y-auto pr-1 custom-scrollbar">
+                    {loading.pending ? (
+                      <li className="text-slate-400 py-4 text-center">⏳ Loading…</li>
+                    ) : pendingNotifications.length === 0 ? (
+                      <li className="text-slate-500 py-8 text-center">✅ No upcoming notifications.</li>
+                    ) : (
+                      pendingNotifications.map((item) => (
+                        <li key={item.id} className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200 cursor-pointer group/item">
+                          <p className="font-bold text-white text-sm mb-2 group-hover/item:text-purple-400 transition-colors">{item.title || "Task"}</p>
+                          <p className="text-xs text-slate-400 font-semibold mb-1">
+                            {item.type === "start" ? "⏱️ Starts in" : item.type === "due" ? "📌 Due" : "🔔 Scheduled"} {" "}
+                            {typeof item.minutesUntil === "number" ? `${item.minutesUntil} min` : "soon"}
+                          </p>
+                          {(item.scheduledTime || item.dueTime) && (
+                            <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
+                              <span className="text-sm">🕐</span> {item.scheduledTime || item.dueTime}
+                            </p>
+                          )}
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </div>
               </div>
-              {notifError && (
-                <p className="mb-4 rounded-xl bg-red-500/20 border border-red-500/40 px-4 py-3 text-xs text-red-400 font-semibold shadow-sm">⚠️ {notifError}</p>
-              )}
-              <ul className="space-y-3 text-sm max-h-72 overflow-y-auto pr-1 custom-scrollbar">
-                {loading.pending ? (
-                  <li className="text-slate-400 py-4 text-center">⏳ Loading…</li>
-                ) : pendingNotifications.length === 0 ? (
-                  <li className="text-slate-500 py-8 text-center">✅ No upcoming notifications.</li>
-                ) : (
-                  pendingNotifications.map((item) => (
-                    <li key={item.id} className="rounded-xl bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200 cursor-pointer group/item">
-                      <p className="font-bold text-white text-sm mb-2 group-hover/item:text-purple-400 transition-colors">{item.title || "Task"}</p>
-                      <p className="text-xs text-slate-400 font-semibold mb-1">
-                        {item.type === "start" ? "⏱️ Starts in" : item.type === "due" ? "📌 Due" : "🔔 Scheduled"} {" "}
-                        {typeof item.minutesUntil === "number" ? `${item.minutesUntil} min` : "soon"}
-                      </p>
-                      {(item.scheduledTime || item.dueTime) && (
-                        <p className="text-xs text-slate-400 font-semibold flex items-center gap-1">
-                          <span className="text-sm">🕐</span> {item.scheduledTime || item.dueTime}
-                        </p>
-                      )}
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
-          </div>
+            </>
+          ) : (
+            <TimetableComponent />
+          )}
         </div>
+
+        {/* Forms & Modals (only active if main tab is daily, or generally available) */}
 
         {openForm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
             <div className="w-full max-w-lg rounded-2xl bg-slate-900 p-8 shadow-2xl border border-cyan-500/30">
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-2xl font-bold text-white">✏️ Add New Task</h3>
-                <button onClick={() => setOpenForm(false)} className="text-slate-400 hover:text-slate-200 transition-colors font-bold text-xl">
+                <h3 className="text-2xl font-bold text-white">✏️ {editingTaskId ? "Edit Task" : "Add New Task"}</h3>
+                <button onClick={() => { setOpenForm(false); resetForm(); }} className="text-slate-400 hover:text-slate-200 transition-colors font-bold text-xl">
                   ✕
                 </button>
               </div>
@@ -852,7 +910,12 @@ const SchedulePage = () => {
                                   <div className="text-xs text-slate-400">{it.category || '—'} • {it.priority || '—'}</div>
                                   {it.deadline && <div className="text-xs text-slate-400 mt-1">Due: {new Date(it.deadline).toLocaleString()}</div>}
                                 </div>
-                                <div className="text-xs text-slate-300">{it.ai_scores ? `U:${(it.ai_scores.urgent||0).toFixed(2)} I:${(it.ai_scores.important||0).toFixed(2)}` : ''}</div>
+                                <div className="flex flex-col items-end gap-1">
+                                  <div className="text-xs text-slate-300">{it.ai_scores ? `U:${(it.ai_scores.urgent || 0).toFixed(2)} I:${(it.ai_scores.important || 0).toFixed(2)}` : ''}</div>
+                                  <button onClick={() => handleEdit(it)} className="text-xs bg-cyan-900/40 text-cyan-200 hover:bg-cyan-800/60 px-2 py-1 rounded transition-colors border border-cyan-500/20">
+                                    ✏️ Edit
+                                  </button>
+                                </div>
                               </div>
                             </li>
                           ))}

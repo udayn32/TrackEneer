@@ -12,6 +12,8 @@ aiohttp==3.9.1
 python-dotenv==1.0.0
 cohere==5.19.0
 google.generativeai
-pymongo>=4.3,<5
+transformers
+torch
+pdfplumber
 
 

@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
+import React from "react";
+import KnowledgeGraph from "../../components/KnowledgeGraph";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:5000";
 
@@ -16,6 +18,9 @@ export default function StudyPage() {
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [previewNote, setPreviewNote] = useState(null);
   const [stats, setStats] = useState(null);
+  const [showGraph, setShowGraph] = useState(false);
+  const [graphKey, setGraphKey] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState(null);
 
   // Form states
   const [subjectForm, setSubjectForm] = useState({ name: "", description: "" });
@@ -107,10 +112,17 @@ export default function StudyPage() {
       });
 
       if (response.ok) {
+        const data = await response.json().catch(() => ({}));
         setUploadForm({ title: "", description: "", file: null });
         setShowUploadModal(false);
+        // Inform user that extraction was queued and refresh notes/stats
+        setUploadStatus((data && data.message) || "File uploaded — extraction queued");
+        // bump graph key to force KnowledgeGraph to refetch when visible
+        setGraphKey((k) => k + 1);
         await fetchNotes(selectedSubject.id);
         await fetchStats();
+        // clear status after a few seconds
+        setTimeout(() => setUploadStatus(null), 6000);
       }
     } catch (error) {
       console.error("Error uploading file:", error);
@@ -204,6 +216,13 @@ export default function StudyPage() {
             </button>
           </div>
         </header>
+        {uploadStatus && (
+          <div className="mb-6 max-w-3xl">
+            <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">
+              {uploadStatus}
+            </div>
+          </div>
+        )}
 
         {/* Stats */}
         {stats && (
@@ -283,14 +302,23 @@ export default function StudyPage() {
                   <span className="mr-2">📁</span>
                   {selectedSubject ? selectedSubject.name : "All Notes"}
                 </h2>
-                {selectedSubject && (
+                <div className="flex items-center gap-3">
                   <button
-                    onClick={() => setShowUploadModal(true)}
-                    className="bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 py-2 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 hover:scale-105 font-semibold text-sm"
+                    onClick={() => setShowGraph((s) => !s)}
+                    className="bg-gradient-to-r from-green-400 to-teal-500 text-white px-3 py-2 rounded-lg hover:shadow-xl hover:shadow-green-400/30 transition-all duration-200 font-semibold text-sm"
                   >
-                    + Upload File
+                    {showGraph ? "Hide" : "View"} Knowledge Graph
                   </button>
-                )}
+
+                  {selectedSubject && (
+                    <button
+                      onClick={() => setShowUploadModal(true)}
+                      className="bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 py-2 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 hover:scale-105 font-semibold text-sm"
+                    >
+                      + Upload File
+                    </button>
+                  )}
+                </div>
               </div>
 
               {notes.length === 0 ? (
@@ -359,6 +387,13 @@ export default function StudyPage() {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+              {showGraph && (
+                <div className="mt-6">
+                  {/* Lazy load KnowledgeGraph component to keep bundle small */}
+                  {/* KnowledgeGraph component (client-side) */}
+                  <KnowledgeGraph key={graphKey} />
                 </div>
               )}
             </div>

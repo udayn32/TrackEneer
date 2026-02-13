@@ -82,10 +82,28 @@ import json
 import smtplib
 from email.message import EmailMessage
 import uvicorn
-from typing import Optional
+from typing import Optional, List
+
+# Import document processor for PDF handling and CSP timetable generation
+from document_processor import (
+    DocumentProcessor, 
+    StudyConstraints, 
+    Subject, 
+    AcademicEvent, 
+    ExamSchedule,
+    CSPTimetableGenerator,
+    universal_extractor
+)
+
+# Initialize document processor
+doc_processor = DocumentProcessor()
 
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
+
+# Import NSGA-II Scheduler
+from nsga2_scheduler import generate_study_schedule
+
 # --- 1. FastAPI App Initialization ---
 app = FastAPI()
 
@@ -543,7 +561,117 @@ async def add_task(request: Request):
         print(f"Error in add_task: {e}")
         raise HTTPException(status_code=500, detail="An internal error occurred while adding the task.")
 
-@app.get("/api/schedule")
+@app.put("/api/tasks/{task_id}")
+async def update_task(task_id: str, request: Request):
+    try:
+        data = await request.json()
+        user_email = _resolve_user_email(request, data)
+        
+        # Parse datetime fields if present
+        start_dt_ist = None
+        if data.get('startTime'):
+            try:
+                start_dt = datetime.fromisoformat(data['startTime'].replace('Z', '+00:00'))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                start_dt_ist = start_dt.astimezone(IST)
+            except Exception as e:
+                print(f"Error parsing startTime: {e}")
+
+        end_dt_ist = None
+        if data.get('endTime'):
+            try:
+                end_dt = datetime.fromisoformat(data['endTime'].replace('Z', '+00:00'))
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                end_dt_ist = end_dt.astimezone(IST)
+            except Exception as e:
+                print(f"Error parsing endTime: {e}")
+
+        due_datetime_to_store = None
+        if data.get('dueDate'):
+            try:
+                due_dt = datetime.fromisoformat(data['dueDate'].replace('Z', '+00:00'))
+                if due_dt.tzinfo is None:
+                    due_dt = due_dt.replace(tzinfo=timezone.utc)
+                due_datetime_to_store = due_dt.astimezone(IST)
+            except Exception as e:
+                print(f"Error parsing dueDate: {e}")
+
+        with driver.session() as session:
+            # Verify ownership and update
+            # We use COALESCE to keep existing values if not provided (PATCH-like behavior)
+            query = """
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task {id: $task_id})
+                SET t.title = coalesce($title, t.title),
+                    t.description = coalesce($description, t.description),
+                    t.startTime = coalesce($start_time, t.startTime),
+                    t.endTime = coalesce($end_time, t.endTime),
+                    t.dueDate = $due_date,  
+                    t.updatedAt = datetime()
+                RETURN t
+            """
+            
+            # Note: dueDate is special because we might want to clear it if explicitly null? 
+            # For now, we assume if it's sent, it updates. If not in payload, we skip updating it?
+            # Actually, `data.get('dueDate')` returns None if missing. 
+            # If user wants to clear it, they might send null.
+            # Let's check keys.
+            
+            params = {
+                'email': user_email,
+                'task_id': task_id,
+                'title': data.get('title'),
+                'description': data.get('description'),
+                'start_time': start_dt_ist,
+                'end_time': end_dt_ist,
+                'due_date': due_datetime_to_store
+            }
+            
+            # If keys are missing from `data`, we pass None, and COALESCE keeps original.
+            # However, for dueDate, we might want to allow setting to NULL.
+            # The query above uses $due_date. If $due_date is None, Neo4j sets it to null? No.
+            # Neo4j property set to null removes the property.
+            # But if I pass None to python driver, it usually passes null.
+            # If I want to partial update dueDate only if provided:
+            # I should handle the SET clause dynamically or be smarter.
+            
+            # Simplified approach: Only update fields present in data keys.
+            sets = []
+            if 'title' in data: sets.append("t.title = $title")
+            if 'description' in data: sets.append("t.description = $description")
+            if 'startTime' in data: sets.append("t.startTime = $start_time")
+            if 'endTime' in data: sets.append("t.endTime = $end_time")
+            if 'dueDate' in data: sets.append("t.dueDate = $due_date")
+            sets.append("t.updatedAt = datetime()")
+            
+            if not sets:
+                return JSONResponse(content={"message": "No fields to update"}, status_code=200)
+
+            final_query = f"""
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task {{id: $task_id}})
+                SET {', '.join(sets)}
+                RETURN t
+            """
+            
+            res = session.run(final_query, **params)
+            if not res.peek():
+                raise HTTPException(status_code=404, detail="Task not found or owned by user")
+                
+            # Update embedding if description changed
+            if 'description' in data and model is not None:
+                try:
+                    vector_db.upsert(ids=[task_id], embeddings=[model.encode(data['description']).tolist()])
+                except Exception as e:
+                    print(f"Warning: could not update embedding: {e}")
+
+        return JSONResponse(content={"message": "Task updated successfully"}, status_code=200)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update task")
 async def get_schedule(date: str, request: Request, email: Optional[str] = None):
     try:
         user_email = _resolve_user_email(request, {'email': email} if email else None)
@@ -600,6 +728,107 @@ async def get_upcoming_deadlines(request: Request, email: Optional[str] = None):
     except Exception as e:
         print(f"Error fetching deadlines: {e}")
         raise HTTPException(status_code=500, detail="Could not fetch upcoming deadlines")
+
+# --- Study Schedule Endpoints ---
+
+@app.post("/api/study/generate")
+async def api_generate_study_schedule(request: Request):
+    """Generate an optimized study schedule based on exams."""
+    try:
+        data = await request.json()
+        exams = data.get('exams', [])
+        if not exams:
+            raise HTTPException(status_code=400, detail="No exams provided")
+        
+        # Run NSGA-II on the backend
+        result = generate_study_schedule(exams)
+        return result
+    except Exception as e:
+        print(f"Error generating study schedule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/study/save")
+async def api_save_study_schedule(request: Request):
+    """Save the generated study schedule to the user's calendar."""
+    try:
+        data = await request.json()
+        schedule = data.get('schedule', [])
+        user_email = _resolve_user_email(request, data)
+        
+        if not schedule:
+            raise HTTPException(status_code=400, detail="No schedule provided to save")
+
+        count = 0
+        with driver.session() as session:
+            for day_sched in schedule:
+                date_str = day_sched.get('date')
+                if not date_str:
+                    continue
+                
+                # Ensure day exists
+                ensure_user_and_day(session, user_email, day=date_str)
+                
+                for session_item in day_sched.get('sessions', []):
+                    subject = session_item.get('subject')
+                    start_time_str = session_item.get('start_time') # "HH:MM"
+                    end_time_str = session_item.get('end_time')     # "HH:MM"
+                    
+                    if not subject or not start_time_str or not end_time_str:
+                        continue
+                        
+                    # Construct full iso datetimes
+                    try:
+                        start_iso = f"{date_str}T{start_time_str}:00"
+                        end_iso = f"{date_str}T{end_time_str}:00"
+                        
+                        # Add timezone info (simplified)
+                        sdt = datetime.fromisoformat(start_iso).replace(tzinfo=IST)
+                        edt = datetime.fromisoformat(end_iso).replace(tzinfo=IST)
+                    except Exception:
+                        continue
+                        
+                    tasks_list = session_item.get('tasks', [])
+                    description = f"Study Session for {subject}.\n"
+                    if tasks_list:
+                        description += "Tasks:\n" + "\n".join([f"- {t.get('task')} ({t.get('duration')}h)" for t in tasks_list])
+                    
+                    task_id = str(uuid.uuid4())
+                    
+                    session.run("""
+                        MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($task_date), email: $email})
+                        CREATE (t:Task {
+                            id: $id, 
+                            title: $title, 
+                            description: $description, 
+                            startTime: datetime($start_time), 
+                            endTime: datetime($end_time), 
+                            status: 'pending', 
+                            createdAt: datetime(), 
+                            priority: $priority, 
+                            category: 'education', 
+                            aiEnhanced: true,
+                            timezone: 'IST', 
+                            ownerEmail: $email, 
+                            dayDate: $task_date
+                        })
+                        MERGE (d)-[:HAS_TASK]->(t)
+                    """, 
+                    email=user_email,
+                    task_date=date_str,
+                    id=task_id,
+                    title=f"Study: {subject}",
+                    description=description,
+                    start_time=sdt,
+                    end_time=edt,
+                    priority=session_item.get('priority', 'medium')
+                    )
+                    count += 1
+        
+        return {"message": f"Successfully saved {count} study sessions to calendar.", "count": count}
+
+    except Exception as e:
+        print(f"Error saving study schedule: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save schedule to calendar")
 
 # --- Quote Cache for External API ---
 QUOTE_CACHE = {}
@@ -2145,6 +2374,759 @@ def populate_vector_db():
         descs = [t['description'] for t in all_tasks]
         vector_db.upsert(ids=ids, embeddings=model.encode(descs).tolist())
         print(f"Vector DB populated with {len(ids)} tasks.")
+
+
+# ============================================================================
+# DOCUMENT UPLOAD & TIMETABLE GENERATION ENDPOINTS
+# ============================================================================
+
+# In-memory storage for user document paths (in production, use database)
+USER_DOCUMENTS = {}  # email -> {syllabus: path, calendar: path, exam_timetable: path}
+USER_CONSTRAINTS = {}  # email -> StudyConstraints
+
+
+@app.post('/api/documents/extract')
+async def extract_any_document(
+    request: Request,
+    file: UploadFile = File(...),
+    email: Optional[str] = Form(None)
+):
+    """
+    🚀 UNIVERSAL PDF EXTRACTOR - Auto-detect and extract from ANY PDF!
+    
+    Automatically detects if the PDF is a syllabus, calendar, or exam timetable
+    and extracts all relevant data using LLM Whisperer OCR + Gemini AI.
+    
+    Returns:
+        - document_type: 'syllabus' | 'calendar' | 'timetable' | 'mixed'
+        - subjects: List of extracted subjects (if syllabus)
+        - events: List of extracted events (if calendar)
+        - exams: List of extracted exams (if timetable)
+        - extraction_method: 'llm_whisperer+gemini' or 'rule_based'
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail='Only PDF files are supported')
+        
+        # Save file temporarily
+        content = await file.read()
+        file_path = doc_processor.save_file(content, file.filename, 'auto')
+        
+        # Universal extraction - auto-detect and extract
+        result = doc_processor.process_any_pdf(file_path)
+        
+        # Store based on detected type
+        if user_email not in USER_DOCUMENTS:
+            USER_DOCUMENTS[user_email] = {}
+        USER_DOCUMENTS[user_email]['last_upload'] = file_path
+        USER_DOCUMENTS[user_email]['last_type'] = result['document_type']
+        
+        print(f"📄 Universal extraction for {user_email}: {result['document_type']} detected")
+        
+        return JSONResponse(content={
+            'message': f"Document processed successfully as {result['document_type']}",
+            'file_path': file_path,
+            'document_type': result['document_type'],
+            'extraction_method': result['extraction_method'],
+            'subjects_count': len(result['subjects']),
+            'events_count': len(result['events']),
+            'exams_count': len(result['exams']),
+            'subjects': result['subjects'],
+            'events': result['events'],
+            'exams': result['exams'],
+            'raw_text_preview': result['raw_text'][:1000] if result['raw_text'] else ''
+        }, status_code=200)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in universal extraction: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f'Failed to process document: {str(e)}')
+
+
+@app.post('/api/documents/upload/syllabus')
+async def upload_syllabus(
+    request: Request,
+    file: UploadFile = File(...),
+    email: Optional[str] = Form(None)
+):
+    """
+    Upload syllabus PDF for text extraction and subject parsing.
+    Returns extracted subjects with topics, difficulty, and estimated hours.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail='Only PDF files are supported')
+        
+        # Save file
+        content = await file.read()
+        file_path = doc_processor.save_file(content, file.filename, 'syllabus')
+        
+        # Extract subjects
+        subjects = doc_processor.process_syllabus(file_path)
+        
+        # Store path for user
+        if user_email not in USER_DOCUMENTS:
+            USER_DOCUMENTS[user_email] = {}
+        USER_DOCUMENTS[user_email]['syllabus'] = file_path
+        
+        # Update constraints
+        if user_email not in USER_CONSTRAINTS:
+            USER_CONSTRAINTS[user_email] = StudyConstraints()
+        USER_CONSTRAINTS[user_email].subjects = subjects
+        
+        print(f"📚 Syllabus uploaded for {user_email}: {len(subjects)} subjects extracted")
+        
+        return JSONResponse(content={
+            'message': 'Syllabus uploaded successfully',
+            'file_path': file_path,
+            'subjects_count': len(subjects),
+            'subjects': [
+                {
+                    'name': s.name,
+                    'topics': s.topics,  # All topics for table display
+                    'topics_count': len(s.topics),
+                    'difficulty': s.difficulty,
+                    'estimated_hours': s.estimated_hours,
+                    'weekly_target_hours': s.weekly_target_hours,
+                    'priority': s.priority
+                }
+                for s in subjects
+            ]
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading syllabus: {e}")
+        raise HTTPException(status_code=500, detail=f'Failed to process syllabus: {str(e)}')
+
+
+@app.post('/api/documents/upload/calendar')
+async def upload_academic_calendar(
+    request: Request,
+    file: UploadFile = File(...),
+    email: Optional[str] = Form(None)
+):
+    """
+    Upload academic calendar PDF for event and holiday extraction.
+    Returns extracted events with dates and types.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail='Only PDF files are supported')
+        
+        content = await file.read()
+        file_path = doc_processor.save_file(content, file.filename, 'calendar')
+        
+        events = doc_processor.process_calendar(file_path)
+        
+        if user_email not in USER_DOCUMENTS:
+            USER_DOCUMENTS[user_email] = {}
+        USER_DOCUMENTS[user_email]['calendar'] = file_path
+        
+        if user_email not in USER_CONSTRAINTS:
+            USER_CONSTRAINTS[user_email] = StudyConstraints()
+        USER_CONSTRAINTS[user_email].academic_events = events
+        
+        print(f"📅 Calendar uploaded for {user_email}: {len(events)} events extracted")
+        
+        # Categorize events
+        holidays = [e for e in events if e.is_holiday]
+        exams = [e for e in events if e.event_type == 'exam']
+        deadlines = [e for e in events if e.event_type == 'deadline']
+        other = [e for e in events if e.event_type not in ['holiday', 'exam', 'deadline']]
+        
+        return JSONResponse(content={
+            'message': 'Academic calendar uploaded successfully',
+            'file_path': file_path,
+            'events_count': len(events),
+            'summary': {
+                'holidays': len(holidays),
+                'exams': len(exams),
+                'deadlines': len(deadlines),
+                'other_events': len(other)
+            },
+            'events': [
+                {
+                    'name': e.name,
+                    'date': e.date,
+                    'end_date': e.end_date,
+                    'event_type': e.event_type,
+                    'is_holiday': e.is_holiday
+                }
+                for e in events[:20]  # First 20 events
+            ]
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading calendar: {e}")
+        raise HTTPException(status_code=500, detail=f'Failed to process calendar: {str(e)}')
+
+
+@app.post('/api/documents/upload/exam-timetable')
+async def upload_exam_timetable(
+    request: Request,
+    file: UploadFile = File(...),
+    email: Optional[str] = Form(None)
+):
+    """
+    Upload exam timetable PDF for exam schedule extraction.
+    Returns extracted exams with dates, times, and subjects.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail='Only PDF files are supported')
+        
+        content = await file.read()
+        file_path = doc_processor.save_file(content, file.filename, 'exam_timetable')
+        
+        exams = doc_processor.process_exam_timetable(file_path)
+        
+        if user_email not in USER_DOCUMENTS:
+            USER_DOCUMENTS[user_email] = {}
+        USER_DOCUMENTS[user_email]['exam_timetable'] = file_path
+        
+        if user_email not in USER_CONSTRAINTS:
+            USER_CONSTRAINTS[user_email] = StudyConstraints()
+        USER_CONSTRAINTS[user_email].exams = exams
+        
+        print(f"📝 Exam timetable uploaded for {user_email}: {len(exams)} exams extracted")
+        
+        return JSONResponse(content={
+            'message': 'Exam timetable uploaded successfully',
+            'file_path': file_path,
+            'exams_count': len(exams),
+            'exams': [
+                {
+                    'subject': e.subject,
+                    'date': e.date,
+                    'start_time': e.start_time,
+                    'end_time': e.end_time,
+                    'venue': e.venue,
+                    'exam_type': e.exam_type
+                }
+                for e in exams
+            ]
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading exam timetable: {e}")
+        raise HTTPException(status_code=500, detail=f'Failed to process exam timetable: {str(e)}')
+
+
+@app.post('/api/documents/upload/all')
+async def upload_all_documents(
+    request: Request,
+    syllabus: Optional[UploadFile] = File(None),
+    calendar: Optional[UploadFile] = File(None),
+    exam_timetable: Optional[UploadFile] = File(None),
+    email: Optional[str] = Form(None)
+):
+    """
+    Upload all documents (syllabus, calendar, exam timetable) at once.
+    At least one document must be provided.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        if not any([syllabus, calendar, exam_timetable]):
+            raise HTTPException(status_code=400, detail='At least one document must be provided')
+        
+        results = {
+            'syllabus': None,
+            'calendar': None,
+            'exam_timetable': None
+        }
+        
+        if user_email not in USER_DOCUMENTS:
+            USER_DOCUMENTS[user_email] = {}
+        if user_email not in USER_CONSTRAINTS:
+            USER_CONSTRAINTS[user_email] = StudyConstraints()
+        
+        # Process syllabus
+        if syllabus and syllabus.filename:
+            if not syllabus.filename.lower().endswith('.pdf'):
+                results['syllabus'] = {'error': 'Only PDF files are supported'}
+            else:
+                content = await syllabus.read()
+                file_path = doc_processor.save_file(content, syllabus.filename, 'syllabus')
+                subjects = doc_processor.process_syllabus(file_path)
+                USER_DOCUMENTS[user_email]['syllabus'] = file_path
+                USER_CONSTRAINTS[user_email].subjects = subjects
+                results['syllabus'] = {
+                    'subjects_count': len(subjects),
+                    'subjects': [
+                        {
+                            'name': s.name,
+                            'topics': s.topics,
+                            'topics_count': len(s.topics),
+                            'difficulty': s.difficulty,
+                            'estimated_hours': s.estimated_hours,
+                            'weekly_target_hours': s.weekly_target_hours,
+                            'priority': s.priority
+                        }
+                        for s in subjects
+                    ]
+                }
+        
+        # Process calendar
+        if calendar and calendar.filename:
+            if not calendar.filename.lower().endswith('.pdf'):
+                results['calendar'] = {'error': 'Only PDF files are supported'}
+            else:
+                content = await calendar.read()
+                file_path = doc_processor.save_file(content, calendar.filename, 'calendar')
+                events = doc_processor.process_calendar(file_path)
+                USER_DOCUMENTS[user_email]['calendar'] = file_path
+                USER_CONSTRAINTS[user_email].academic_events = events
+                results['calendar'] = {
+                    'events_count': len(events),
+                    'holidays': len([e for e in events if e.is_holiday]),
+                    'events': [
+                        {
+                            'name': e.name,
+                            'date': e.date.isoformat() if hasattr(e.date, 'isoformat') else str(e.date),
+                            'is_holiday': e.is_holiday,
+                            'is_exam': e.is_exam_period
+                        }
+                        for e in events[:20]  # Limit to 20 for display
+                    ]
+                }
+        
+        # Process exam timetable
+        if exam_timetable and exam_timetable.filename:
+            if not exam_timetable.filename.lower().endswith('.pdf'):
+                results['exam_timetable'] = {'error': 'Only PDF files are supported'}
+            else:
+                content = await exam_timetable.read()
+                file_path = doc_processor.save_file(content, exam_timetable.filename, 'exam_timetable')
+                exams = doc_processor.process_exam_timetable(file_path)
+                USER_DOCUMENTS[user_email]['exam_timetable'] = file_path
+                USER_CONSTRAINTS[user_email].exams = exams
+                results['exam_timetable'] = {
+                    'exams_count': len(exams),
+                    'exams': [
+                        {
+                            'subject': e.subject,
+                            'date': e.date.isoformat() if hasattr(e.date, 'isoformat') else str(e.date),
+                            'start_time': e.start_time,
+                            'end_time': e.end_time,
+                            'venue': e.venue
+                        }
+                        for e in exams
+                    ]
+                }
+        
+        print(f"📂 Documents uploaded for {user_email}: {results}")
+        
+        return JSONResponse(content={
+            'message': 'Documents uploaded successfully',
+            'results': results
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading documents: {e}")
+        raise HTTPException(status_code=500, detail=f'Failed to process documents: {str(e)}')
+
+
+@app.get('/api/documents/status')
+async def get_document_status(request: Request, email: Optional[str] = None):
+    """
+    Get status of uploaded documents for a user.
+    Returns which documents have been uploaded and their extraction summary.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        docs = USER_DOCUMENTS.get(user_email, {})
+        constraints = USER_CONSTRAINTS.get(user_email)
+        
+        status = {
+            'syllabus_uploaded': 'syllabus' in docs,
+            'calendar_uploaded': 'calendar' in docs,
+            'exam_timetable_uploaded': 'exam_timetable' in docs,
+            'ready_for_generation': bool(constraints and constraints.subjects)
+        }
+        
+        if constraints:
+            status['summary'] = {
+                'subjects_count': len(constraints.subjects),
+                'events_count': len(constraints.academic_events),
+                'exams_count': len(constraints.exams)
+            }
+        
+        return JSONResponse(content=status, status_code=200)
+    except Exception as e:
+        print(f"Error getting document status: {e}")
+        raise HTTPException(status_code=500, detail='Failed to get document status')
+
+
+@app.post('/api/timetable/generate')
+async def generate_study_timetable(request: Request):
+    """
+    Generate personalized study timetable using CSP algorithm.
+    
+    Uses uploaded documents (syllabus, calendar, exam timetable) to create
+    an optimized study schedule that:
+    - Prioritizes subjects based on exam proximity
+    - Respects holidays and events from calendar
+    - Balances weekly hours per subject
+    - Considers subject difficulty
+    
+    Request body (optional):
+    {
+        "email": "user@example.com",
+        "preferences": {
+            "study_start_hour": 8,
+            "study_end_hour": 20,
+            "max_daily_hours": 6,
+            "days_ahead": 14,
+            "slot_duration_minutes": 60
+        }
+    }
+    """
+    try:
+        data = await request.json() if request.headers.get('content-type') == 'application/json' else {}
+        user_email = _resolve_user_email(request, data)
+        preferences = data.get('preferences', {})
+        
+        constraints = USER_CONSTRAINTS.get(user_email)
+        
+        if not constraints or not constraints.subjects:
+            raise HTTPException(
+                status_code=400, 
+                detail='No subjects found. Please upload a syllabus first.'
+            )
+        
+        # Update preferences
+        constraints.preferences = preferences
+        
+        # Generate timetable using CSP
+        generator = CSPTimetableGenerator(constraints)
+        timetable = generator.generate()
+        
+        print(f"📅 Timetable generated for {user_email}: {len(timetable)} study slots")
+        
+        # Group by date for better presentation
+        by_date = {}
+        for slot in timetable:
+            date = slot['date']
+            if date not in by_date:
+                by_date[date] = {
+                    'date': date,
+                    'day': slot['day'],
+                    'slots': []
+                }
+            by_date[date]['slots'].append({
+                'start_time': slot['start_time'],
+                'end_time': slot['end_time'],
+                'subject': slot['subject'],
+                'difficulty': slot['difficulty'],
+                'topics': slot.get('topics', [])
+            })
+        
+        # Calculate statistics
+        subject_hours = {}
+        for slot in timetable:
+            subj = slot['subject']
+            subject_hours[subj] = subject_hours.get(subj, 0) + 1
+        
+        return JSONResponse(content={
+            'message': 'Timetable generated successfully',
+            'total_slots': len(timetable),
+            'total_hours': len(timetable),
+            'days_covered': len(by_date),
+            'subject_distribution': subject_hours,
+            'schedule': list(by_date.values()),
+            'raw_slots': timetable[:50]  # First 50 slots for detailed view
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating timetable: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f'Failed to generate timetable: {str(e)}')
+
+
+@app.post('/api/timetable/generate-manual')
+async def generate_timetable_manual(request: Request):
+    """
+    Generate timetable with manually provided subjects (no PDF upload needed).
+    
+    Request body:
+    {
+        "subjects": [
+            {
+                "name": "Data Structures",
+                "difficulty": "hard",
+                "estimated_hours": 40,
+                "weekly_target_hours": 8,
+                "priority": 9,
+                "topics": ["Arrays", "Trees", "Graphs"]
+            }
+        ],
+        "exams": [
+            {
+                "subject": "Data Structures",
+                "date": "2026-02-01",
+                "start_time": "09:00"
+            }
+        ],
+        "holidays": ["2026-01-26", "2026-01-31"],
+        "preferences": {
+            "study_start_hour": 8,
+            "study_end_hour": 20,
+            "max_daily_hours": 6,
+            "days_ahead": 14
+        }
+    }
+    """
+    try:
+        data = await request.json()
+        
+        # Parse subjects
+        subjects_data = data.get('subjects', [])
+        if not subjects_data:
+            raise HTTPException(status_code=400, detail='At least one subject is required')
+        
+        subjects = []
+        for s in subjects_data:
+            subjects.append(Subject(
+                name=s.get('name', 'Unknown'),
+                topics=s.get('topics', []),
+                difficulty=s.get('difficulty', 'medium'),
+                estimated_hours=s.get('estimated_hours', 20),
+                priority=s.get('priority', 5),
+                weekly_target_hours=s.get('weekly_target_hours', 4),
+                prerequisites=s.get('prerequisites', [])
+            ))
+        
+        # Parse exams
+        exams_data = data.get('exams', [])
+        exams = []
+        for e in exams_data:
+            exams.append(ExamSchedule(
+                subject=e.get('subject', ''),
+                date=e.get('date', ''),
+                start_time=e.get('start_time'),
+                end_time=e.get('end_time'),
+                exam_type=e.get('exam_type', 'exam')
+            ))
+        
+        # Parse holidays
+        holidays = data.get('holidays', [])
+        events = [
+            AcademicEvent(name='Holiday', date=d, is_holiday=True)
+            for d in holidays if d
+        ]
+        
+        # Create constraints
+        constraints = StudyConstraints(
+            subjects=subjects,
+            academic_events=events,
+            exams=exams,
+            preferences=data.get('preferences', {})
+        )
+        
+        # Generate timetable
+        generator = CSPTimetableGenerator(constraints)
+        timetable = generator.generate()
+        
+        # Group by date
+        by_date = {}
+        for slot in timetable:
+            date = slot['date']
+            if date not in by_date:
+                by_date[date] = {'date': date, 'day': slot['day'], 'slots': []}
+            by_date[date]['slots'].append({
+                'start_time': slot['start_time'],
+                'end_time': slot['end_time'],
+                'subject': slot['subject'],
+                'difficulty': slot['difficulty']
+            })
+        
+        return JSONResponse(content={
+            'message': 'Timetable generated successfully',
+            'total_slots': len(timetable),
+            'schedule': list(by_date.values())
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating manual timetable: {e}")
+        raise HTTPException(status_code=500, detail=f'Failed to generate timetable: {str(e)}')
+
+
+@app.get('/api/timetable/constraints')
+async def get_current_constraints(request: Request, email: Optional[str] = None):
+    """
+    Get current constraints (subjects, events, exams) for a user.
+    Useful for reviewing what was extracted before generating timetable.
+    """
+    try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
+        
+        constraints = USER_CONSTRAINTS.get(user_email)
+        
+        if not constraints:
+            return JSONResponse(content={
+                'message': 'No constraints found. Please upload documents first.',
+                'constraints': None
+            }, status_code=200)
+        
+        return JSONResponse(content={
+            'constraints': constraints.to_dict()
+        }, status_code=200)
+    except Exception as e:
+        print(f"Error getting constraints: {e}")
+        raise HTTPException(status_code=500, detail='Failed to get constraints')
+
+
+@app.put('/api/timetable/constraints/subjects')
+async def update_subject_constraints(request: Request):
+    """
+    Update subject constraints (priority, weekly hours, difficulty) after extraction.
+    Allows user to fine-tune before generating timetable.
+    
+    Request body:
+    {
+        "email": "user@example.com",
+        "subjects": [
+            {
+                "name": "Data Structures",
+                "priority": 10,
+                "weekly_target_hours": 10,
+                "difficulty": "hard"
+            }
+        ]
+    }
+    """
+    try:
+        data = await request.json()
+        user_email = _resolve_user_email(request, data)
+        
+        constraints = USER_CONSTRAINTS.get(user_email)
+        if not constraints:
+            raise HTTPException(status_code=400, detail='No constraints found. Upload documents first.')
+        
+        updates = {s['name'].lower(): s for s in data.get('subjects', [])}
+        
+        for subject in constraints.subjects:
+            update = updates.get(subject.name.lower())
+            if update:
+                if 'priority' in update:
+                    subject.priority = update['priority']
+                if 'weekly_target_hours' in update:
+                    subject.weekly_target_hours = update['weekly_target_hours']
+                if 'difficulty' in update:
+                    subject.difficulty = update['difficulty']
+                if 'estimated_hours' in update:
+                    subject.estimated_hours = update['estimated_hours']
+        
+        return JSONResponse(content={
+            'message': 'Subject constraints updated successfully',
+            'subjects': [
+                {
+                    'name': s.name,
+                    'priority': s.priority,
+                    'weekly_target_hours': s.weekly_target_hours,
+                    'difficulty': s.difficulty
+                }
+                for s in constraints.subjects
+            ]
+        }, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating constraints: {e}")
+        raise HTTPException(status_code=500, detail='Failed to update constraints')
+
+
+# --- Robust Document Extraction Endpoints ---
+
+@app.post("/api/extract-syllabus")
+async def extract_syllabus_endpoint(syllabus_pdf: UploadFile = File(...)):
+    """Extract syllabus using robust Universal Extractor (Digital + OCR + AI)."""
+    try:
+        # Save uploaded file temporarily
+        file_path = f"temp_{uuid.uuid4()}.pdf"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(syllabus_pdf.file, buffer)
+            
+        try:
+            # Use the robust universal extractor
+            result = universal_extractor.extract_any_pdf(file_path)
+            
+            # If explicit syllabus detected or just mixed, return subjects
+            subjects = result.get('subjects', [])
+            return {"subjects": subjects, "meta": result.get('extraction_method')}
+            
+        finally:
+            # Clean up
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+    except Exception as e:
+        print(f"Error extracting syllabus: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/extract-exam-timetable")
+async def extract_exam_endpoint(timetable_pdf: UploadFile = File(...)):
+    """Extract exam timetable using robust Universal Extractor."""
+    try:
+        file_path = f"temp_{uuid.uuid4()}.pdf"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(timetable_pdf.file, buffer)
+            
+        try:
+            result = universal_extractor.extract_any_pdf(file_path)
+            exams = result.get('exams', [])
+            return {"exams": exams, "meta": result.get('extraction_method')}
+            
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+    except Exception as e:
+        print(f"Error extracting exam timetable: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/extract-calendar")
+async def extract_calendar_endpoint(calendar_pdf: UploadFile = File(...)):
+    """Extract academic calendar using robust Universal Extractor."""
+    try:
+        file_path = f"temp_{uuid.uuid4()}.pdf"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(calendar_pdf.file, buffer)
+            
+        try:
+            result = universal_extractor.extract_any_pdf(file_path)
+            events = result.get('events', [])
+            return {"events": events, "meta": result.get('extraction_method')}
+            
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+    except Exception as e:
+        print(f"Error extracting calendar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- Main Execution ---
 if __name__ == '__main__':

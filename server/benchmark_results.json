@@ -1,0 +1,15 @@
+{
+  "5_exams": {
+    "success_rate_pct": 100.0,
+    "avg_time_sec": 17.07287061214447,
+    "std_time_sec": 1.303960272654295,
+    "avg_convergence_gen": 146,
+    "stability_std": 0.4751457565150841,
+    "avg_soft_penalty": 72.5,
+    "avg_compactness": 26,
+    "avg_load_balance": 2.530044220772928,
+    "avg_cramming": 7.322417117487571,
+    "avg_switching": 46.0,
+    "avg_revision": -67.40685450577035
+  }
+}
