@@ -1,6 +1,11 @@
 """Unified FastAPI application consolidating TrackEneer services behind one server."""
 from __future__ import annotations
 
+import sys, io
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import os
 
 from fastapi import FastAPI
@@ -17,28 +22,28 @@ try:
     from knowledge_graph import app as kg_app
     HAS_KG = True
 except Exception as e:
-    print(f"⚠ Knowledge Graph module not loaded: {e}")
+    print(f"[WARN] Knowledge Graph module not loaded: {e}")
     HAS_KG = False
 
 try:
     from mentor import app as mentor_app
     HAS_MENTOR = True
 except Exception as e:
-    print(f"⚠ AI Mentor module not loaded: {e}")
+    print(f"[WARN] AI Mentor module not loaded: {e}")
     HAS_MENTOR = False
 
 try:
     from knowledge_tracing import app as kt_app
     HAS_KT = True
 except Exception as e:
-    print(f"⚠ Knowledge Tracing module not loaded: {e}")
+    print(f"[WARN] Knowledge Tracing module not loaded: {e}")
     HAS_KT = False
 
 try:
     from career_readiness import app as career_app
     HAS_CAREER = True
 except Exception as e:
-    print(f"⚠ Career Readiness module not loaded: {e}")
+    print(f"[WARN] Career Readiness module not loaded: {e}")
     HAS_CAREER = False
 
 # Import document processor for PDF extraction with Hybrid + Local NLP
@@ -95,16 +100,16 @@ _include_app(placement_app)
 # ─── Cognitive Learning Ecosystem ───
 if HAS_KG:
     _include_app(kg_app)
-    print("✓ Knowledge Graph module loaded")
+    print("[OK] Knowledge Graph module loaded")
 if HAS_MENTOR:
     _include_app(mentor_app)
-    print("✓ AI Mentor module loaded")
+    print("[OK] AI Mentor module loaded")
 if HAS_KT:
     _include_app(kt_app)
-    print("✓ Knowledge Tracing module loaded")
+    print("[OK] Knowledge Tracing module loaded")
 if HAS_CAREER:
     _include_app(career_app)
-    print("✓ Career Readiness module loaded")
+    print("[OK] Career Readiness module loaded")
 
 
 @app.get("/health")
@@ -120,7 +125,20 @@ async def health_check() -> dict[str, str]:
             "ai_mentor": HAS_MENTOR,
             "knowledge_tracing": HAS_KT,
             "career_readiness": HAS_CAREER,
-        }
+        },
+        "knowledge_graph_pipeline": {
+            "preprocessing_stages": [
+                "Stage 1: Fix hyphenation (word-\\nbreak → wordbreak)",
+                "Stage 2a: Remove URLs",
+                "Stage 2b: Remove emails",
+                "Stage 3: Remove standalone page numbers",
+                "Stage 4a: Collapse multiple spaces/tabs",
+                "Stage 4b: Collapse excessive newlines (3+ → 2)",
+                "Stage 5: Strip non-printable characters",
+            ],
+            "extraction_strategies": ["llm (MiniLM-L6 SIF+MMR)", "embedding (SentenceTransformer)", "nlp (SpaCy + heuristic)"],
+            "logging": "Per-stage char reduction logged at INFO level via EduKGPipeline._preprocess_text()"
+        } if HAS_KG else None
     }
 
 

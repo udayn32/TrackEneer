@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:5000";
+const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
 
 export default function KnowledgeGraph({ email }) {
   const [loading, setLoading] = useState(true);
@@ -14,9 +14,10 @@ export default function KnowledgeGraph({ email }) {
     const fetchGraph = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`${API_BASE}/api/notes/graph` + (email ? `?email=${encodeURIComponent(email)}` : ""));
+        const res = await fetch(`${API_BASE}/api/knowledge-graph` + (email ? `?email=${encodeURIComponent(email)}` : ""));
         const data = await res.json();
-        setGraph(data);
+        // EduKG API returns { nodes, edges } directly (not data.data)
+        setGraph({ nodes: data.nodes || [], edges: data.edges || [] });
       } catch (err) {
         console.error("Failed to fetch notes graph:", err);
         setError(err?.message || String(err));
