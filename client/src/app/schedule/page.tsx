@@ -125,9 +125,14 @@ const SchedulePage = () => {
   const [activeMainTab, setActiveMainTab] = useState<"daily" | "timetable">("daily");
 
   const today = useMemo(() => new Date(), []);
+  const userEmail = session?.user?.email ?? "";
 
   useEffect(() => {
+    // Don't fetch user-specific data until we have an email
+    if (!userEmail) return;
+
     const controller = new AbortController();
+    const eq = encodeURIComponent(userEmail);
 
     const fetchQuote = async () => {
       try {
@@ -146,7 +151,7 @@ const SchedulePage = () => {
     const fetchTasks = async () => {
       try {
         const formatted = today.toISOString().split("T")[0];
-        const response = await fetch(`${API_BASE}/api/schedule?date=${formatted}`, { signal: controller.signal });
+        const response = await fetch(`${API_BASE}/api/schedule?date=${formatted}&email=${eq}`, { signal: controller.signal });
         if (!response.ok) throw new Error("Failed to fetch tasks");
         const data = await response.json();
         setTasks(Array.isArray(data.tasks) ? data.tasks : []);
@@ -161,7 +166,7 @@ const SchedulePage = () => {
 
     const fetchDeadlines = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/upcoming-deadlines`, { signal: controller.signal });
+        const response = await fetch(`${API_BASE}/api/upcoming-deadlines?email=${eq}`, { signal: controller.signal });
         if (!response.ok) throw new Error("Failed to fetch deadlines");
         const data = await response.json();
         setDeadlines(Array.isArray(data.deadlines) ? data.deadlines : []);
@@ -176,7 +181,7 @@ const SchedulePage = () => {
 
     const fetchRecommendations = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/recommend-tasks`, { signal: controller.signal });
+        const response = await fetch(`${API_BASE}/api/recommend-tasks?email=${eq}`, { signal: controller.signal });
         if (!response.ok) throw new Error("Failed to fetch recommendations");
         const data = await response.json();
         setRecommendations(Array.isArray(data.recommendations) ? data.recommendations : []);
@@ -191,7 +196,7 @@ const SchedulePage = () => {
 
     const fetchPendingNotifications = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/notifications/pending`, { signal: controller.signal });
+        const response = await fetch(`${API_BASE}/api/notifications/pending?email=${eq}`, { signal: controller.signal });
         if (!response.ok) throw new Error("Failed to fetch notifications");
         const data = await response.json();
         setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []);
@@ -207,7 +212,7 @@ const SchedulePage = () => {
     const fetchEisenhower = async () => {
       try {
         setLoadingEisenhower(true);
-        const res = await fetch(`${API_BASE}/api/schedule/eisenhower`, { signal: controller.signal });
+        const res = await fetch(`${API_BASE}/api/schedule/eisenhower?email=${eq}`, { signal: controller.signal });
         if (!res.ok) throw new Error('Failed to fetch eisenhower');
         const data = await res.json();
         setEisenhower(data);
@@ -220,7 +225,7 @@ const SchedulePage = () => {
 
     const fetchEisenhowerMatrix = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/schedule/eisenhower/matrix`, { signal: controller.signal });
+        const res = await fetch(`${API_BASE}/api/schedule/eisenhower/matrix?email=${eq}`, { signal: controller.signal });
         if (!res.ok) throw new Error('Failed to fetch eisenhower matrix');
         const data = await res.json();
         setEisenhowerMatrix(data);
@@ -238,7 +243,29 @@ const SchedulePage = () => {
     fetchEisenhowerMatrix();
 
     return () => controller.abort();
-  }, [today]);
+  }, [today, userEmail]);
+
+  // Listen for auto-created tasks from the "What we should know" knowledge capture
+  useEffect(() => {
+    if (!userEmail) return;
+    const eq = encodeURIComponent(userEmail);
+
+    const handleKnowledgeTasks = () => {
+      // Re-fetch today's tasks and deadlines when knowledge creates new tasks
+      const formatted = today.toISOString().split("T")[0];
+      fetch(`${API_BASE}/api/schedule?date=${formatted}&email=${eq}`)
+        .then((res) => res.json())
+        .then((data) => setTasks(Array.isArray(data.tasks) ? data.tasks : []))
+        .catch(() => {});
+      fetch(`${API_BASE}/api/upcoming-deadlines?email=${eq}`)
+        .then((res) => res.json())
+        .then((data) => setDeadlines(Array.isArray(data.deadlines) ? data.deadlines : []))
+        .catch(() => {});
+    };
+
+    window.addEventListener('knowledge-tasks-created', handleKnowledgeTasks);
+    return () => window.removeEventListener('knowledge-tasks-created', handleKnowledgeTasks);
+  }, [today, userEmail]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -422,6 +449,7 @@ const SchedulePage = () => {
       startTime: form.startTime ? new Date(form.startTime).toISOString() : null,
       endTime: form.endTime ? new Date(form.endTime).toISOString() : null,
       dueDate: form.dueDate ? new Date(form.dueDate).toISOString() : null,
+      email: userEmail || undefined,
     };
 
     try {
@@ -445,22 +473,23 @@ const SchedulePage = () => {
       setOpenForm(false);
       resetForm();
       // Refresh all data
+      const eq = userEmail ? encodeURIComponent(userEmail) : "";
       Promise.all([
-        fetch(`${API_BASE}/api/schedule?date=${today.toISOString().split("T")[0]}`)
+        fetch(`${API_BASE}/api/schedule?date=${today.toISOString().split("T")[0]}${eq ? `&email=${eq}` : ""}`)
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to refresh tasks"))))
           .then((data) => setTasks(Array.isArray(data.tasks) ? data.tasks : []))
           .catch(() => undefined),
-        fetch(`${API_BASE}/api/upcoming-deadlines`)
+        fetch(`${API_BASE}/api/upcoming-deadlines${eq ? `?email=${eq}` : ""}`)
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to refresh deadlines"))))
           .then((data) => setDeadlines(Array.isArray(data.deadlines) ? data.deadlines : []))
           .catch(() => undefined),
-        fetch(`${API_BASE}/api/notifications/pending`)
+        fetch(`${API_BASE}/api/notifications/pending${eq ? `?email=${eq}` : ""}`)
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error("Failed to refresh notifications"))))
           .then((data) => setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []))
           .catch(() => undefined),
         // Also refresh Eisenhower if we edited something
-        fetch(`${API_BASE}/api/schedule/eisenhower`).then(r => r.json()).then(d => setEisenhower(d)).catch(() => undefined),
-        fetch(`${API_BASE}/api/schedule/eisenhower/matrix`).then(r => r.json()).then(d => setEisenhowerMatrix(d)).catch(() => undefined)
+        fetch(`${API_BASE}/api/schedule/eisenhower${eq ? `?email=${eq}` : ""}`).then(r => r.json()).then(d => setEisenhower(d)).catch(() => undefined),
+        fetch(`${API_BASE}/api/schedule/eisenhower/matrix${eq ? `?email=${eq}` : ""}`).then(r => r.json()).then(d => setEisenhowerMatrix(d)).catch(() => undefined)
       ]);
     } catch (err) {
       setError((err as Error).message || "Failed to save task");
@@ -472,10 +501,11 @@ const SchedulePage = () => {
   // Allow manual refresh of Eisenhower data from the UI
   const handleRefreshEisenhower = async () => {
     setLoadingEisenhower(true);
+    const eq = userEmail ? encodeURIComponent(userEmail) : "";
     try {
       const [r1, r2] = await Promise.all([
-        fetch(`${API_BASE}/api/schedule/eisenhower`),
-        fetch(`${API_BASE}/api/schedule/eisenhower/matrix`),
+        fetch(`${API_BASE}/api/schedule/eisenhower${eq ? `?email=${eq}` : ""}`),
+        fetch(`${API_BASE}/api/schedule/eisenhower/matrix${eq ? `?email=${eq}` : ""}`),
       ]);
       if (r1.ok) {
         try {
@@ -749,7 +779,8 @@ const SchedulePage = () => {
                       onClick={async () => {
                         setLoading((prev) => ({ ...prev, pending: true }));
                         try {
-                          const response = await fetch(`${API_BASE}/api/notifications/pending`);
+                          const eq = userEmail ? encodeURIComponent(userEmail) : "";
+                          const response = await fetch(`${API_BASE}/api/notifications/pending${eq ? `?email=${eq}` : ""}`);
                           if (!response.ok) throw new Error("Failed to fetch notifications");
                           const data = await response.json();
                           setPendingNotifications(Array.isArray(data.notifications) ? data.notifications : []);

@@ -24,7 +24,9 @@ app.add_middleware(
 )
 
 # --- Configuration ---
-COHERE_API_KEY = "rM2zziYqveYXde5i74mQjLRSVU2NE22klhea4Xu1"
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+if not COHERE_API_KEY:
+    raise RuntimeError("COHERE_API_KEY is not set. Add it to your .env file.")
 co = cohere.Client(COHERE_API_KEY)
 
 CACHE_DURATION = 24 * 60 * 60  # 24 hours in seconds

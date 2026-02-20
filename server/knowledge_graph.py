@@ -49,7 +49,9 @@ except Exception:
 # ---------- Gemini ----------
 try:
     import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "AIzaSyDL1SqUudycymjYNnlm4z7ajfFkL3ht77k"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY not set")
     genai.configure(api_key=GEMINI_API_KEY)
     _gemini_model = genai.GenerativeModel("gemini-2.5-flash")
     HAS_GEMINI = True
@@ -182,10 +184,15 @@ class ConceptExtractor:
         global _minilm_tokenizer, _minilm_model
         if HAS_TRANSFORMERS and _minilm_model is None:
             try:
-                model_name = "sentence-transformers/all-MiniLM-L6-v2"
+                model_path = os.getenv("EMBED_MODEL", "./all-MiniLM-L6-v2")
+                # Prefer local model; fall back to HuggingFace Hub
+                if os.path.isdir(model_path):
+                    model_name = model_path
+                else:
+                    model_name = "sentence-transformers/all-MiniLM-L6-v2"
                 _minilm_tokenizer = AutoTokenizer.from_pretrained(model_name)
                 _minilm_model = AutoModel.from_pretrained(model_name)
-                logger.info("✓ MiniLM-L6-v2 initialized successfully")
+                logger.info("✓ MiniLM-L6-v2 initialized successfully from %s", model_name)
             except Exception as e:
                 logger.error(f"✗ Failed to initialize MiniLM: {e}")
 
@@ -854,7 +861,7 @@ class KnowledgeGraphStore:
     def __init__(self):
         self.driver = get_driver()
 
-    def store_concepts(self, concepts: List[Concept], user_email: str, day: str = None) -> int:
+    def store_concepts(self, concepts: List[Concept], user_email: str, day: Optional[str] = None) -> int:
         """Store concepts as nodes in Neo4j."""
         day_iso = normalize_day(day)
         count = 0
@@ -1220,7 +1227,7 @@ Return JSON:
             data = json.loads(raw)
 
             updates = 0
-            with self.driver.session() as session:
+            with self.store.driver.session() as session:
                 for e in data.get("enrichments", []):
                     name = e.get("name", "")
                     if not name:
@@ -1323,7 +1330,7 @@ async def build_kg_from_file(
         f.write(content)
 
     # Process in background
-    original_name = file.filename
+    original_name = file.filename or "unknown"
     def _process():
         try:
             r = pipeline.process_pdf(str(file_path), user_email, strategy=strategy, original_filename=original_name)

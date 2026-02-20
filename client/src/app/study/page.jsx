@@ -3,7 +3,12 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import React from "react";
-import KnowledgeGraph from "../../components/KnowledgeGraph";
+import dynamic from "next/dynamic";
+
+const KnowledgeGraph = dynamic(() => import("../../components/KnowledgeGraph"), {
+  ssr: false,
+  loading: () => <div className="p-6 text-slate-400">Loading Knowledge Graph…</div>,
+});
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:5000";
 
@@ -22,14 +27,53 @@ export default function StudyPage() {
   const [graphKey, setGraphKey] = useState(0);
   const [uploadStatus, setUploadStatus] = useState(null);
 
+  // Search states
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState(null);
+  const [searching, setSearching] = useState(false);
+
   // Form states
   const [subjectForm, setSubjectForm] = useState({ name: "", description: "" });
   const [uploadForm, setUploadForm] = useState({ title: "", description: "", file: null });
 
+  // BM25 Search
+  const handleSearch = async (query) => {
+    if (!query.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    setSearching(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&top_k=10`);
+      const data = await response.json();
+      setSearchResults(data.results);
+    } catch (error) {
+      console.error("Search failed:", error);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      handleSearch(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Helper: build headers with user email
+  const authHeaders = () => {
+    const headers = {};
+    const email = session?.user?.email;
+    if (email) headers["x-user-email"] = email;
+    return headers;
+  };
+
   // Fetch subjects
   const fetchSubjects = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/subjects`);
+      const response = await fetch(`${API_BASE}/api/subjects`, { headers: authHeaders() });
       const data = await response.json();
       setSubjects(data.subjects || []);
     } catch (error) {
@@ -43,7 +87,7 @@ export default function StudyPage() {
       const url = subjectId 
         ? `${API_BASE}/api/notes?subject_id=${subjectId}`
         : `${API_BASE}/api/notes`;
-      const response = await fetch(url);
+      const response = await fetch(url, { headers: authHeaders() });
       const data = await response.json();
       setNotes(data.notes || []);
     } catch (error) {
@@ -54,7 +98,7 @@ export default function StudyPage() {
   // Fetch stats
   const fetchStats = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/study/stats`);
+      const response = await fetch(`${API_BASE}/api/study/stats`, { headers: authHeaders() });
       const data = await response.json();
       setStats(data);
     } catch (error) {
@@ -79,8 +123,11 @@ export default function StudyPage() {
       formData.append("name", subjectForm.name);
       formData.append("description", subjectForm.description);
 
+      if (session?.user?.email) formData.append("email", session.user.email);
+
       const response = await fetch(`${API_BASE}/api/subjects`, {
         method: "POST",
+        headers: authHeaders(),
         body: formData,
       });
 
@@ -105,9 +152,11 @@ export default function StudyPage() {
       formData.append("subject_id", selectedSubject.id);
       formData.append("title", uploadForm.title || uploadForm.file.name);
       formData.append("description", uploadForm.description);
+      if (session?.user?.email) formData.append("email", session.user.email);
 
       const response = await fetch(`${API_BASE}/api/notes/upload`, {
         method: "POST",
+        headers: authHeaders(),
         body: formData,
       });
 
@@ -136,6 +185,7 @@ export default function StudyPage() {
     try {
       const response = await fetch(`${API_BASE}/api/notes/${noteId}`, {
         method: "DELETE",
+        headers: authHeaders(),
       });
 
       if (response.ok) {
@@ -214,6 +264,106 @@ export default function StudyPage() {
             >
               + Add Subject
             </button>
+          </div>
+
+          {/* Search Bar */}
+          <div className="mt-4 relative">
+            <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search notes, subjects, tasks..."
+                className="w-full bg-slate-900/80 border border-slate-700 text-white pl-12 pr-4 py-3 rounded-xl focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 placeholder-slate-500 transition-all"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => { setSearchQuery(""); setSearchResults(null); }}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Search Results Dropdown */}
+            {searchResults && searchQuery && (
+              <div className="absolute top-full left-0 right-0 mt-2 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-20 max-h-80 overflow-y-auto">
+                {searching ? (
+                  <p className="p-4 text-slate-400 text-center">Searching...</p>
+                ) : (
+                  <>
+                    {(searchResults.notes?.length > 0 || searchResults.subjects?.length > 0 || searchResults.tasks?.length > 0) ? (
+                      <div className="p-3 space-y-3">
+                        {searchResults.subjects?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-purple-400 uppercase tracking-wider px-2 mb-1">Subjects</p>
+                            {searchResults.subjects.map((r) => {
+                              const subj = subjects.find((s) => s.id === r.id);
+                              return (
+                                <button
+                                  key={r.id}
+                                  onClick={() => {
+                                    const found = subjects.find((s) => s.id === r.id);
+                                    if (found) { setSelectedSubject(found); fetchNotes(found.id); }
+                                    setSearchQuery(""); setSearchResults(null);
+                                  }}
+                                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
+                                >
+                                  <span>📚</span>
+                                  <span className="text-white text-sm">{subj?.name || r.id}</span>
+                                  <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {searchResults.notes?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-blue-400 uppercase tracking-wider px-2 mb-1">Notes</p>
+                            {searchResults.notes.map((r) => {
+                              const note = notes.find((n) => n.id === r.id);
+                              return (
+                                <button
+                                  key={r.id}
+                                  onClick={() => {
+                                    if (note) handlePreviewNote(note);
+                                    setSearchQuery(""); setSearchResults(null);
+                                  }}
+                                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
+                                >
+                                  <span>📄</span>
+                                  <span className="text-white text-sm">{note?.title || r.id}</span>
+                                  <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {searchResults.tasks?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-cyan-400 uppercase tracking-wider px-2 mb-1">Tasks</p>
+                            {searchResults.tasks.map((r) => (
+                              <div
+                                key={r.id}
+                                className="px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
+                              >
+                                <span>✅</span>
+                                <span className="text-white text-sm">{r.id}</span>
+                                <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="p-4 text-slate-400 text-center">No results found</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </header>
         {uploadStatus && (

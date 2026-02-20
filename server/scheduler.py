@@ -1,8 +1,24 @@
 import os
+import sys
 import uuid
 import chromadb
 import requests  # Re-added
 import aiohttp
+import re
+import shutil
+
+# Force UTF-8 stdout/stderr so Unicode symbols don't crash on Windows cp1252
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -82,6 +98,7 @@ import json
 import smtplib
 from email.message import EmailMessage
 import uvicorn
+
 from typing import Optional, List
 
 # Import document processor for PDF handling and CSP timetable generation
@@ -97,6 +114,10 @@ from document_processor import (
 
 # Initialize document processor
 doc_processor = DocumentProcessor()
+
+from typing import Optional
+from pydantic import BaseModel, Field
+
 
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
@@ -177,37 +198,94 @@ PREFER_SKIP = os.getenv('SKIP_MODEL_LOAD', '0') == '1'
 EMBED_MODEL = os.getenv('EMBED_MODEL') or './all-MiniLM-L6-v2'
 CLASSIFIER_MODEL = os.getenv('CLASSIFIER_MODEL')
 
-if PREFER_SKIP:
-    print("SKIP_MODEL_LOAD=1 detected — skipping heavy model downloads for faster startup (dev mode).")
-else:
+
+def _clean_pooling_config(model_dir: Path) -> None:
+    """Remove pooling parameters unsupported by older sentence-transformers versions.
+
+    Newer HuggingFace model cards ship params like ``pooling_mode_weightedmean_tokens``,
+    ``pooling_mode_lasttoken`` and ``include_prompt`` which cause a TypeError on
+    sentence-transformers < 2.3.  Stripping them is safe because only ``mean`` pooling
+    is active for MiniLM.
+    """
+    pooling_config = model_dir / "1_Pooling" / "config.json"
+    if not pooling_config.exists():
+        return
+    SUPPORTED_KEYS = {
+        "word_embedding_dimension",
+        "pooling_mode_cls_token",
+        "pooling_mode_mean_tokens",
+        "pooling_mode_max_tokens",
+        "pooling_mode_mean_sqrt_len_tokens",
+    }
     try:
-        model = SentenceTransformer(EMBED_MODEL)
-        print(f"Loaded embedding model: {EMBED_MODEL}")
+        with open(pooling_config, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        unknown = set(cfg.keys()) - SUPPORTED_KEYS
+        if unknown:
+            for k in unknown:
+                del cfg[k]
+            with open(pooling_config, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+            print(f"Cleaned pooling config at {pooling_config}: removed unsupported keys {unknown}")
     except Exception as e:
-        print(f"Could not load embedding model {EMBED_MODEL}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise RuntimeError(f"Failed to load embedding model {EMBED_MODEL}: {e}")
+        print(f"Warning: could not clean pooling config at {pooling_config}: {e}")
+
+
+def _load_sentence_transformer(model_name: str) -> SentenceTransformer:
+    """Load a SentenceTransformer model, cleaning broken cache directories if needed."""
+    cache_root = Path(os.getenv("SENTENCE_TRANSFORMERS_HOME", Path.home() / ".cache" / "sentence_transformers"))
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    safe_folder = model_name.replace("/", "_")
+    candidate_dir = cache_root / safe_folder
+
+    expected_files = (
+        "pytorch_model.bin",
+        "model.safetensors",
+        "tf_model.h5",
+        "model.ckpt.index",
+        "flax_model.msgpack",
+    )
+
+    if candidate_dir.exists() and not any((candidate_dir / fname).exists() for fname in expected_files):
+        print(f"Incomplete cached model detected for {model_name}. Removing {candidate_dir} and retrying download.")
+        shutil.rmtree(candidate_dir, ignore_errors=True)
+
+    # Clean pooling config for the local model path (if it's a directory)
+    local_path = Path(model_name)
+    if local_path.is_dir():
+        _clean_pooling_config(local_path)
+
+    # Clean pooling config for the cached copy (if it exists)
+    if candidate_dir.exists():
+        _clean_pooling_config(candidate_dir)
+
+    return SentenceTransformer(model_name, cache_folder=str(cache_root))
+
+def _initialize_models() -> None:
+    global model, classifier_model, nlp, label_prototypes
+
+    if PREFER_SKIP:
+        print("SKIP_MODEL_LOAD=1 detected — skipping heavy model downloads for faster startup (dev mode).")
+        return
+
+    try:
+        model = _load_sentence_transformer(EMBED_MODEL)
+        print(f"Loaded embedding model: {EMBED_MODEL}")
+
+    except Exception as exc:
+        print(f"Could not load embedding model {EMBED_MODEL}: {exc}")
+        print("Falling back to lightweight model 'sentence-transformers/all-MiniLM-L6-v2'.")
+        model = _load_sentence_transformer("sentence-transformers/all-MiniLM-L6-v2")
+        print("Loaded fallback embedding model: sentence-transformers/all-MiniLM-L6-v2")
 
     if CLASSIFIER_MODEL:
         try:
-            # --- START: Cache clearing logic for classifier ---
-            try:
-                default_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "torch", "sentence_transformers")
-                model_cache_path = os.path.join(default_cache_dir, CLASSIFIER_MODEL.replace("/", "_")) # Use safe name
-                
-                if os.path.exists(model_cache_path):
-                    print(f"Corrupt model cache detected. Attempting to remove: {model_cache_path}")
-                    shutil.rmtree(model_cache_path)
-                    print("Cache removed successfully.")
-            except Exception as e:
-                print(f"Warning: Could not remove cached model directory: {e}")
-            # --- END: Cache clearing logic for classifier ---
+            classifier_model = _load_sentence_transformer(CLASSIFIER_MODEL)
 
-            classifier_model = SentenceTransformer(CLASSIFIER_MODEL)
             print(f"Loaded classifier model: {CLASSIFIER_MODEL}")
-        except Exception as e:
-            print(f"Warning: could not load classifier model {CLASSIFIER_MODEL}: {e}")
+        except Exception as exc:
+            print(f"Warning: could not load classifier model {CLASSIFIER_MODEL}: {exc}")
 
     try:
         nlp = spacy.load("en_core_web_sm")
@@ -223,8 +301,11 @@ else:
         proto_embs = proto_source.encode(proto_labels)
         for lab, emb in zip(proto_labels, proto_embs):
             label_prototypes[lab] = emb
-    except Exception as e:
-        print(f"Warning: could not create prototype label embeddings: {e}")
+    except Exception as exc:
+        print(f"Warning: could not create prototype label embeddings: {exc}")
+
+
+_initialize_models()
 
 chroma_client = chromadb.Client()
 vector_db = chroma_client.get_or_create_collection(name="dynamic_task_scheduler_neo4j")
@@ -233,6 +314,318 @@ print("AI Models and Vector DB are ready.")
 # WebSocket connection manager
 connected_webs = set()
 NOTIFIED_TASK_KEYS = set()
+
+SEGMENT_SPLIT_PATTERN = re.compile(r"[\n\r]+|(?<=[.!?])\s+(?=[A-Z0-9])")
+FALLBACK_DATE_PATTERN = re.compile(
+    r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|"
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+    r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{2,4})?)?)\b",
+    re.IGNORECASE,
+)
+FALLBACK_TIME_PATTERN = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?|\b\d{1,2}\s*(?:am|pm)\b", re.IGNORECASE)
+
+
+def _segment_knowledge_text(text: str) -> list[str]:
+    segments = [seg.strip(" \t•-_") for seg in SEGMENT_SPLIT_PATTERN.split(text) if seg.strip()]
+    if not segments:
+        lone = text.strip()
+        return [lone] if lone else []
+    return segments
+
+
+def _extract_temporal_hints(snippet: str) -> list[str]:
+    hints: list[str] = []
+    global nlp
+    try:
+        if nlp:
+            doc = nlp(snippet)
+            hints.extend(ent.text for ent in doc.ents if ent.label_ in {"DATE", "TIME"})
+    except Exception as exc:
+        print(f"Warning: could not run spaCy for knowledge hints: {exc}")
+    if not hints:
+        hints.extend(FALLBACK_DATE_PATTERN.findall(snippet))
+        hints.extend(FALLBACK_TIME_PATTERN.findall(snippet))
+    unique_hints: list[str] = []
+    for hint in hints:
+        normalized = hint.strip()
+        if normalized and normalized not in unique_hints:
+            unique_hints.append(normalized)
+    return unique_hints
+
+
+class KnowledgePayload(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000, description="User submitted note to ingest")
+    pagePath: Optional[str] = Field(None, max_length=200, description="Front-end route where the note originated")
+
+
+# --- Actionable Task Extraction from Knowledge Notes ---
+
+# Patterns that indicate an actionable event / task
+_ACTION_KEYWORDS = re.compile(
+    r"\b(meeting|deadline|submit|presentation|exam|interview|call|appointment|"
+    r"class|lecture|workshop|seminar|webinar|viva|demo|review|standup|sync|"
+    r"due|hand.?in|turn.?in|deliver|defend|session|conference|hackathon|test)\b",
+    re.IGNORECASE,
+)
+
+# Regex to extract time like "4 pm", "16:00", "4:30 PM", "at 2", etc.
+_TIME_RE = re.compile(
+    r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)\b"
+    r"|\b(?:at\s+)(\d{1,2})(?::(\d{2}))?\b"
+    r"|\b(\d{1,2}):(\d{2})\b",
+    re.IGNORECASE,
+)
+
+# Regex for relative day references
+_RELATIVE_DAY_RE = re.compile(
+    r"\b(today|tonight|tomorrow|day after tomorrow)\b", re.IGNORECASE
+)
+
+# Regex for absolute dates like "3rd Nov", "March 15", "15/03", "2026-03-15"
+_ABSOLUTE_DATE_RE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
+    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"(?:\s+(\d{4}))?\b"
+    r"|\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
+    r"(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b"
+    r"|\b(\d{4})-(\d{2})-(\d{2})\b"
+    r"|\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+    'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+    'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+    'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+    'dec': 12, 'december': 12,
+}
+
+_DEFAULT_DURATION_MINUTES = 60
+
+
+def _parse_time_from_text(text: str) -> Optional[tuple]:
+    """Extract (hour, minute) in 24h format from text. Returns None if not found."""
+    m = _TIME_RE.search(text)
+    if not m:
+        return None
+    groups = m.groups()
+    # Pattern 1: "4 pm", "4:30 PM"
+    if groups[0] is not None:
+        hour = int(groups[0])
+        minute = int(groups[1]) if groups[1] else 0
+        meridiem = (groups[2] or '').lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        return (hour, minute)
+    # Pattern 2: "at 2", "at 14:30"
+    if groups[3] is not None:
+        hour = int(groups[3])
+        minute = int(groups[4]) if groups[4] else 0
+        # Heuristic: if hour <= 6 assume PM for common phrases like "at 4"
+        if hour <= 6:
+            hour += 12
+        return (hour, minute)
+    # Pattern 3: "16:00"
+    if groups[5] is not None:
+        return (int(groups[5]), int(groups[6]))
+    return None
+
+
+def _parse_date_from_text(text: str, reference: datetime = None) -> Optional[datetime]:
+    """Extract a date from the text. Returns a datetime (date only, time=00:00) or None."""
+    if reference is None:
+        reference = datetime.now(IST)
+
+    # Check relative days first
+    rm = _RELATIVE_DAY_RE.search(text)
+    if rm:
+        word = rm.group(1).lower()
+        if word in ('today', 'tonight'):
+            return reference.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif word == 'tomorrow':
+            return (reference + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif word == 'day after tomorrow':
+            return (reference + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Check spaCy DATE entities
+    if nlp:
+        try:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ == 'DATE':
+                    ent_lower = ent.text.lower().strip()
+                    if ent_lower in ('today', 'tonight', 'now'):
+                        return reference.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if ent_lower == 'tomorrow':
+                        return (reference + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        except Exception:
+            pass
+
+    # Check absolute date patterns
+    am = _ABSOLUTE_DATE_RE.search(text)
+    if am:
+        groups = am.groups()
+        try:
+            # "3rd Nov", "3 November 2026"
+            if groups[0] is not None and groups[1] is not None:
+                day = int(groups[0])
+                month = _MONTH_MAP.get(groups[1].lower()[:3], 0)
+                year = int(groups[2]) if groups[2] else reference.year
+                if month:
+                    return reference.replace(year=year, month=month, day=day,
+                                             hour=0, minute=0, second=0, microsecond=0)
+            # "Nov 3", "November 3, 2026"
+            elif groups[3] is not None and groups[4] is not None:
+                month = _MONTH_MAP.get(groups[3].lower()[:3], 0)
+                day = int(groups[4])
+                year = int(groups[5]) if groups[5] else reference.year
+                if month:
+                    return reference.replace(year=year, month=month, day=day,
+                                             hour=0, minute=0, second=0, microsecond=0)
+            # "2026-03-15"
+            elif groups[6] is not None:
+                return reference.replace(year=int(groups[6]), month=int(groups[7]),
+                                         day=int(groups[8]),
+                                         hour=0, minute=0, second=0, microsecond=0)
+            # "15/03" or "15/03/2026"
+            elif groups[9] is not None and groups[10] is not None:
+                d, mo = int(groups[9]), int(groups[10])
+                yr = int(groups[11]) if groups[11] else reference.year
+                if yr < 100:
+                    yr += 2000
+                if mo > 12 and d <= 12:
+                    d, mo = mo, d
+                return reference.replace(year=yr, month=mo, day=d,
+                                         hour=0, minute=0, second=0, microsecond=0)
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def _build_task_title(text: str) -> str:
+    """Build a concise task title from the raw text."""
+    # Remove time/date references to create a cleaner title
+    title = _TIME_RE.sub('', text)
+    title = _RELATIVE_DAY_RE.sub('', title)
+    title = _ABSOLUTE_DATE_RE.sub('', title)
+    # Clean up leftover prepositions and whitespace
+    title = re.sub(r'\b(at|on|by|from|to|the)\s*$', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'^\s*(i have a|i have|i got a|i got|there is a|there is|my)\s+', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'\s{2,}', ' ', title).strip(' .,;:-')
+    if title:
+        title = title[0].upper() + title[1:]
+    return title or 'Task from knowledge note'
+
+
+def _extract_actionable_tasks(text: str, reference_time: datetime = None) -> list[dict]:
+    """
+    Analyse a knowledge note and extract actionable tasks.
+    Returns a list of dicts with keys: title, description, startTime, endTime, source.
+    """
+    if reference_time is None:
+        reference_time = datetime.now(IST)
+
+    segments = _segment_knowledge_text(text)
+    tasks = []
+
+    for segment in segments:
+        # Only consider segments with actionable keywords
+        if not _ACTION_KEYWORDS.search(segment):
+            continue
+
+        parsed_time = _parse_time_from_text(segment)
+        parsed_date = _parse_date_from_text(segment, reference_time)
+
+        # If we have at least a time or a date, create a task
+        if parsed_time is None and parsed_date is None:
+            continue
+
+        # Default date = today if only time given
+        if parsed_date is None:
+            parsed_date = reference_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if parsed_time is not None:
+            start_dt = parsed_date.replace(hour=parsed_time[0], minute=parsed_time[1], second=0, microsecond=0)
+        else:
+            # If only date given, default to 9 AM
+            start_dt = parsed_date.replace(hour=9, minute=0, second=0, microsecond=0)
+
+        end_dt = start_dt + timedelta(minutes=_DEFAULT_DURATION_MINUTES)
+
+        title = _build_task_title(segment)
+
+        tasks.append({
+            'title': title,
+            'description': segment.strip(),
+            'startTime': start_dt,
+            'endTime': end_dt,
+            'source': 'knowledge-capture',
+        })
+
+    return tasks
+
+
+def _create_task_from_knowledge(task_info: dict, user_email: str) -> Optional[str]:
+    """Create a Task node in Neo4j from extracted knowledge. Returns task_id or None."""
+    try:
+        task_id = str(uuid.uuid4())
+        start_dt = task_info['startTime']
+        end_dt = task_info['endTime']
+
+        ai_analysis = auto_schedule_task({
+            'title': task_info['title'],
+            'description': task_info['description'],
+        })
+
+        task_day_iso = start_dt.date().isoformat()
+
+        with driver.session() as sess:
+            ensure_user_and_day(sess, user_email, day=task_day_iso)
+            sess.run("""
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(d:Day {date: date($task_date), email: $email})
+                CREATE (t:Task {
+                    id: $id, title: $title, description: $description,
+                    startTime: datetime($start_time), endTime: datetime($end_time),
+                    status: 'pending',
+                    dueDate: datetime($end_time),
+                    createdAt: datetime(), priority: $priority, category: $category,
+                    estimatedDuration: $estimated_duration, aiEnhanced: $ai_enhanced,
+                    timezone: 'IST', ownerEmail: $email, dayDate: $task_date,
+                    source: 'knowledge-capture'
+                })
+                MERGE (d)-[:HAS_TASK]->(t)
+            """,
+            task_date=task_day_iso,
+            id=task_id,
+            title=task_info['title'],
+            description=task_info['description'],
+            start_time=start_dt,
+            end_time=end_dt,
+            email=user_email,
+            **ai_analysis)
+
+        # Add embedding
+        try:
+            if model is not None:
+                vector_db.add(
+                    ids=[task_id],
+                    embeddings=[model.encode(task_info['description']).tolist()]
+                )
+        except Exception as e:
+            print(f"Warning: could not add embedding for knowledge task: {e}")
+
+        print(f"✅ Auto-created task from knowledge: '{task_info['title']}' at {start_dt.isoformat()}")
+        return task_id
+    except Exception as e:
+        print(f"Warning: failed to auto-create task from knowledge: {e}")
+        return None
 
 async def notify_clients(payload: dict):
     """Broadcast a JSON payload to all connected websocket clients."""
@@ -442,6 +835,121 @@ def infer_finish_to_start_relations(max_distance_hours: int = 72):
         print(f"Error in infer_finish_to_start_relations: {e}")
 
 # --- 4. API Endpoints ---
+
+
+@app.post("/knowledge")
+async def ingest_knowledge(payload: KnowledgePayload, request: Request):
+    cleaned = (payload.text or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Please add a short description before submitting.")
+
+    segments = _segment_knowledge_text(cleaned)
+    if not segments:
+        raise HTTPException(status_code=400, detail="We could not parse your note into any entries.")
+
+    entries = [
+        {
+            "text": segment,
+            "temporalHints": _extract_temporal_hints(segment),
+            "pagePath": payload.pagePath,
+            "index": idx,
+        }
+        for idx, segment in enumerate(segments)
+    ]
+
+    user_email = _resolve_user_email(request, payload.dict(exclude_none=True))
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    try:
+        with driver.session() as session:
+            day_iso = ensure_user_and_day(session, user_email, now=now)
+            result = session.run(
+                """
+                MATCH (u:User {email: $email})
+                MATCH (d:Day {date: date($day), email: $email})
+                WITH u, d
+                UNWIND $entries AS entry
+                CREATE (k:KnowledgeItem {
+                    id: randomUUID(),
+                    text: entry.text,
+                    pagePath: entry.pagePath,
+                    createdAt: datetime($now),
+                    sentenceIndex: entry.index,
+                    source: 'user-entry',
+                    temporalHints: entry.temporalHints,
+                    originalSubmission: $raw
+                })
+                MERGE (u)-[:ADDED_KNOWLEDGE {createdAt: datetime($now)}]->(k)
+                MERGE (k)-[:RELATES_TO_DAY]->(d)
+                RETURN {
+                    id: k.id,
+                    text: k.text,
+                    temporalHints: k.temporalHints,
+                    pagePath: k.pagePath
+                } AS item
+                """,
+                email=user_email,
+                day=day_iso,
+                entries=entries,
+                now=now_iso,
+                raw=cleaned,
+            ).data()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Error storing knowledge for {user_email}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to store the knowledge entry.")
+
+    stored_items = [neo4j_to_serializable(record["item"]) for record in result]
+
+    # --- Auto-create tasks from actionable knowledge entries ---
+    auto_created_tasks = []
+    try:
+        now_ist = datetime.now(IST)
+        extracted = _extract_actionable_tasks(cleaned, reference_time=now_ist)
+        for task_info in extracted:
+            task_id = _create_task_from_knowledge(task_info, user_email)
+            if task_id:
+                auto_created_tasks.append({
+                    'taskId': task_id,
+                    'title': task_info['title'],
+                    'startTime': task_info['startTime'].isoformat(),
+                    'endTime': task_info['endTime'].isoformat(),
+                    'source': 'knowledge-capture',
+                })
+                # Notify connected clients about the new task
+                try:
+                    notification_payload = {
+                        'type': 'task_added',
+                        'taskId': task_id,
+                        'title': task_info['title'],
+                        'description': task_info['description'],
+                        'startTime': task_info['startTime'].isoformat(),
+                        'endTime': task_info['endTime'].isoformat(),
+                        'task': {
+                            'id': task_id,
+                            'title': task_info['title'],
+                            'description': task_info['description'],
+                            'startTime': task_info['startTime'].isoformat(),
+                            'endTime': task_info['endTime'].isoformat(),
+                        }
+                    }
+                    asyncio.create_task(notify_clients(notification_payload))
+                except Exception:
+                    pass
+        if auto_created_tasks:
+            print(f"✅ Auto-created {len(auto_created_tasks)} task(s) from knowledge capture")
+    except Exception as exc:
+        print(f"Warning: task extraction from knowledge failed: {exc}")
+
+    return {
+        "added": len(stored_items),
+        "items": stored_items,
+        "autoCreatedTasks": auto_created_tasks,
+    }
+
+
 @app.post("/api/add-task")
 async def add_task(request: Request):
     try:
@@ -649,7 +1157,7 @@ async def update_task(task_id: str, request: Request):
                 return JSONResponse(content={"message": "No fields to update"}, status_code=200)
 
             final_query = f"""
-                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task {{id: $task_id}})
+                MATCH (u:User {{email: $email}})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task {{id: $task_id}})
                 SET {', '.join(sets)}
                 RETURN t
             """
@@ -672,6 +1180,8 @@ async def update_task(task_id: str, request: Request):
     except Exception as e:
         print(f"Error updating task: {e}")
         raise HTTPException(status_code=500, detail="Failed to update task")
+
+@app.get("/api/schedule")
 async def get_schedule(date: str, request: Request, email: Optional[str] = None):
     try:
         user_email = _resolve_user_email(request, {'email': email} if email else None)
@@ -830,6 +1340,168 @@ async def api_save_study_schedule(request: Request):
         print(f"Error saving study schedule: {e}")
         raise HTTPException(status_code=500, detail="Failed to save schedule to calendar")
 
+
+@app.post("/api/study/add-to-knowledge-graph")
+async def api_add_schedule_to_knowledge_graph(request: Request):
+    """Import the NSGA-II generated study schedule into the Neo4j knowledge graph.
+
+    This creates:
+    - A :StudyTimetable node representing the overall schedule
+    - :StudySession nodes for each daily session
+    - :Subject nodes for each unique subject (merged with existing Concepts)
+    - Relationships: User -[:HAS_TIMETABLE]-> StudyTimetable
+                     StudyTimetable -[:HAS_SESSION]-> StudySession
+                     StudySession -[:COVERS_SUBJECT]-> Subject/Concept
+    """
+    try:
+        data = await request.json()
+        schedule = data.get('schedule', [])
+        user_email = _resolve_user_email(request, data)
+        timetable_name = data.get('name', 'NSGA-II Study Timetable')
+
+        if not schedule:
+            raise HTTPException(status_code=400, detail="No schedule provided")
+
+        timetable_id = str(uuid.uuid4())
+        total_days = len(schedule)
+        total_sessions = 0
+        total_hours = 0
+        subjects_seen = set()
+
+        with driver.session() as session:
+            # 1. Ensure user exists
+            ensure_user_and_day(session, user_email)
+
+            # 2. Create the StudyTimetable node
+            session.run("""
+                MATCH (u:User {email: $email})
+                MERGE (tt:StudyTimetable {id: $tt_id})
+                ON CREATE SET
+                    tt.name = $name,
+                    tt.totalDays = $total_days,
+                    tt.createdAt = datetime(),
+                    tt.source = 'nsga2',
+                    tt.ownerEmail = $email
+                ON MATCH SET
+                    tt.name = $name,
+                    tt.totalDays = $total_days,
+                    tt.updatedAt = datetime()
+                MERGE (u)-[:HAS_TIMETABLE]->(tt)
+            """,
+                email=user_email,
+                tt_id=timetable_id,
+                name=timetable_name,
+                total_days=total_days,
+            )
+
+            # 3. Create sessions and link to subjects
+            for day_sched in schedule:
+                date_str = day_sched.get('date')
+                if not date_str:
+                    continue
+                # Normalize date to YYYY-MM-DD
+                if isinstance(date_str, str) and 'T' in date_str:
+                    date_str = date_str.split('T')[0]
+
+                for sess in day_sched.get('sessions', []):
+                    subject = sess.get('subject')
+                    if not subject:
+                        continue
+
+                    session_id = str(uuid.uuid4())
+                    start_time = sess.get('start_time', sess.get('startTime', '09:00'))
+                    end_time = sess.get('end_time', sess.get('endTime', '10:00'))
+                    hours = sess.get('hours', 1)
+                    priority = sess.get('priority', 'normal')
+                    days_until_exam = sess.get('days_until_exam', sess.get('daysUntilExam', 999))
+                    tasks_list = sess.get('tasks', [])
+
+                    total_sessions += 1
+                    total_hours += hours
+                    subjects_seen.add(subject)
+
+                    tasks_desc = "; ".join(
+                        [f"{t.get('task', '')} ({t.get('duration', '')}h, {t.get('type', '')})" for t in tasks_list]
+                    ) if tasks_list else ""
+
+                    # Create StudySession node and link to timetable
+                    session.run("""
+                        MATCH (tt:StudyTimetable {id: $tt_id})
+                        CREATE (ss:StudySession {
+                            id: $ss_id,
+                            date: $date,
+                            subject: $subject,
+                            startTime: $start_time,
+                            endTime: $end_time,
+                            hours: $hours,
+                            priority: $priority,
+                            daysUntilExam: $days_until_exam,
+                            tasks: $tasks_desc,
+                            createdAt: datetime(),
+                            ownerEmail: $email
+                        })
+                        MERGE (tt)-[:HAS_SESSION]->(ss)
+                    """,
+                        tt_id=timetable_id,
+                        ss_id=session_id,
+                        date=date_str,
+                        subject=subject,
+                        start_time=start_time,
+                        end_time=end_time,
+                        hours=hours,
+                        priority=priority,
+                        days_until_exam=days_until_exam,
+                        tasks_desc=tasks_desc,
+                        email=user_email,
+                    )
+
+                    # Link session to a Concept/Subject node (merge so existing concepts are reused)
+                    session.run("""
+                        MATCH (ss:StudySession {id: $ss_id})
+                        MATCH (u:User {email: $email})
+                        MERGE (subj:Concept {name: $subject_name, userEmail: $email})
+                        ON CREATE SET
+                            subj.id = randomUUID(),
+                            subj.category = 'subject',
+                            subj.difficulty = 'medium',
+                            subj.source_document = 'nsga2_timetable',
+                            subj.createdAt = datetime()
+                        MERGE (u)-[:HAS_CONCEPT]->(subj)
+                        MERGE (ss)-[:COVERS_SUBJECT]->(subj)
+                    """,
+                        ss_id=session_id,
+                        subject_name=subject,
+                        email=user_email,
+                    )
+
+            # 4. Update timetable totals
+            session.run("""
+                MATCH (tt:StudyTimetable {id: $tt_id})
+                SET tt.totalSessions = $total_sessions,
+                    tt.totalHours = $total_hours,
+                    tt.subjectCount = $subject_count
+            """,
+                tt_id=timetable_id,
+                total_sessions=total_sessions,
+                total_hours=total_hours,
+                subject_count=len(subjects_seen),
+            )
+
+        return {
+            "message": f"Timetable added to knowledge graph with {total_sessions} sessions across {total_days} days.",
+            "timetableId": timetable_id,
+            "totalSessions": total_sessions,
+            "totalHours": total_hours,
+            "subjects": list(subjects_seen),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error adding schedule to knowledge graph: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add schedule to knowledge graph")
+
+
 # --- Quote Cache for External API ---
 QUOTE_CACHE = {}
 QUOTE_CACHE_TAGS = {
@@ -855,7 +1527,7 @@ FALLBACK_QUOTES = [
     {"content": "Excellence is not a destination; it is a continuous journey that never ends.", "author": "Brian Tracy", "category": "placement"},
 ]
 
-async def _fetch_external_quote_api(tags: list = None):
+async def _fetch_external_quote_api(tags: list | None = None):
     """Fetch quote from external API (Quotable API or Zenquotes)."""
     try:
         # Try Quotable API first (free, no auth needed)
@@ -895,7 +1567,7 @@ async def _fetch_external_quote_api(tags: list = None):
     
     return None
 
-def _generate_contextual_quote_with_ai(module: str = None, task_data: dict = None):
+def _generate_contextual_quote_with_ai(module: str | None = None, task_data: dict | None = None):
     """Generate AI-based contextual quote using embeddings."""
     try:
         if not model:
@@ -950,7 +1622,7 @@ def _generate_contextual_quote_with_ai(module: str = None, task_data: dict = Non
     return None
 
 @app.get("/api/quote")
-async def get_quote(module: str = None, use_ai: bool = False):
+async def get_quote(module: str | None = None, use_ai: bool = False):
     """
     Return a motivational quote with multiple fallback strategies.
     
@@ -1152,57 +1824,51 @@ def _recommendations_for_topic(topic_detected: str):
     return recs
 
 @app.get('/api/recommend-tasks')
-async def recommend_tasks(topic: str | None = None):
+async def recommend_tasks(request: Request, topic: str | None = None, email: Optional[str] = None):
     try:
-        forced = topic
-        if forced:
-            t = forced.lower()
-            if t in ('projects', 'project'):
-                recs = []
-                try:
-                    with driver.session() as session:
-                        res = session.run("""
-                            MATCH (t:Task) 
-                            WHERE toLower(coalesce(t.category,'')) CONTAINS 'project' 
-                            OR toLower(coalesce(t.title,'')) CONTAINS 'project' 
-                            RETURN t.id as id, t.title as title, t.estimatedDuration as est 
-                            LIMIT 20
-                        """)
-                        rows = [r.data() for r in res]
-                    
-                    for r in rows:
-                        tid = r.get('id')
-                        title = r.get('title') or 'Untitled Project'
-                        est = None
+        forced = (topic or '').strip().lower() if topic else None
+        # Prefer session cookie for authentication, fall back to header and default
+        cookie_email = None
+        cookie_token = request.cookies.get('trackeneer_session')
+        if cookie_token:
+            try:
+                db = get_mongo_db()
+                sess = db.sessions.find_one({'token': cookie_token})
+                if sess:
+                    exp = sess.get('expiresAt')
+                    resolved_email = sess.get('email')
+                    if exp:
                         try:
-                            est = int(r.get('est')) if r.get('est') is not None else None
+                            exp_dt = _parse_iso_to_dt(exp)
+                            if exp_dt and exp_dt < datetime.utcnow():
+                                resolved_email = None
                         except Exception:
-                            try:
-                                est = int(float(r.get('est')))
-                            except Exception:
-                                est = None
-                        base = est or 60
-                        plan = max(10, int(round(base * 0.2)))
-                        implement = max(15, int(round(base * 0.6)))
-                        verify = max(5, int(round(base * 0.2)))
-                        recs.append({'label': f'Plan — {title}', 'type': 'plan', 'estimate_minutes': plan, 'taskId': tid, 'taskTitle': title})
-                        recs.append({'label': f'Implement — {title}', 'type': 'implement', 'estimate_minutes': implement, 'taskId': tid, 'taskTitle': title})
-                        recs.append({'label': f'Verify — {title}', 'type': 'verify', 'estimate_minutes': verify, 'taskId': tid, 'taskTitle': title})
-                except Exception as e:
-                    print(f"Error generating project splits: {e}")
-                return {'topic': t, 'recommendations': recs}
-            
-            recs = _recommendations_for_topic(t)
-            return {'topic': t, 'recommendations': recs}
+                            pass
+                    cookie_email = resolved_email
+            except Exception as e:
+                print(f"Warning: session lookup failed: {e}")
+
+        header_email = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+        preferred_email = email or cookie_email or header_email
+        payload = {'email': preferred_email} if preferred_email else None
+        user_email = _resolve_user_email(request, payload)
+
+        # Ensure user/day nodes exist even if the topic is forced via query string
+        with driver.session() as session:
+            ensure_user_and_day(session, user_email)
+
+        if forced:
+            recs = _recommendations_for_topic(forced)
+            return {'topic': forced, 'recommendations': recs}
 
         # Auto-detect topic
         with driver.session() as session:
             result = session.run("""
-                MATCH (t:Task) 
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
                 WHERE t.status='pending' AND t.description IS NOT NULL 
                 RETURN t.description AS desc, t.title AS title 
                 LIMIT 1
-            """)
+            """, email=user_email)
             seed = result.single()
 
         seed_text = ''
@@ -1229,12 +1895,12 @@ async def recommend_tasks(topic: str | None = None):
             try:
                 with driver.session() as session:
                     res = session.run("""
-                        MATCH (t:Task) 
+                        MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
                         WHERE toLower(coalesce(t.category,'')) CONTAINS 'project' 
                         OR toLower(coalesce(t.title,'')) CONTAINS 'project' 
                         RETURN t.id as id, t.title as title, t.estimatedDuration as est 
                         LIMIT 20
-                    """)
+                    """, email=user_email)
                     rows = [r.data() for r in res]
                 
                 for r in rows:
@@ -1690,10 +2356,9 @@ async def api_login(request: Request, response: Response):
                 raise HTTPException(status_code=401, detail='Invalid credentials')
 
             user = rec['u']
-            user_obj = {k: neo4j_to_serializable(v) for k,v in dict(user).items()} if hasattr(user, 'items') else dict(user)
- 
-            touch_user_login(session, email=email, name=user_obj.get('name'))
-            ensure_user_and_day(session, email=email, name=user_obj.get('name'))
+
+            user_obj = {k: neo4j_to_serializable(v) for k, v in dict(user).items()} if hasattr(user, 'items') else dict(user)
+
 
             # Create a server-side session token stored in Mongo and set an HttpOnly cookie
             try:
@@ -1708,11 +2373,20 @@ async def api_login(request: Request, response: Response):
                     'createdAt': datetime.utcnow().isoformat(),
                     'expiresAt': expires_at
                 })
-                # set cookie (httpOnly)
-                response.set_cookie('trackeneer_session', token, httponly=True, samesite='lax', path='/', max_age=7*24*3600)
+                response.set_cookie(
+                    'trackeneer_session',
+                    token,
+                    httponly=True,
+                    samesite='lax',
+                    path='/',
+                    max_age=7 * 24 * 3600,
+                )
             except Exception as e:
                 print(f"Warning: could not create server session: {e}")
 
+
+            touch_user_login(session, email=email, name=str(user_obj.get('name') or ''))
+            ensure_user_and_day(session, email=email, name=str(user_obj.get('name') or ''))
 
             return {
                 'id': user_obj.get('id'),
@@ -1735,32 +2409,35 @@ async def api_me(request: Request):
         user_email = _resolve_user_email(request, payload)
 
         # Prefer session cookie for authentication, fall back to header
+
+        # Prefer server-side session cookie if available, then fall back to headers/default
+        cookie_email: Optional[str] = None
+
         cookie_token = request.cookies.get('trackeneer_session')
-        email_hdr = None
         if cookie_token:
             try:
                 db = get_mongo_db()
                 sess = db.sessions.find_one({'token': cookie_token})
                 if sess:
-                    # check expiry
+                    resolved_email = sess.get('email')
                     exp = sess.get('expiresAt')
                     if exp:
                         try:
                             exp_dt = _parse_iso_to_dt(exp)
                             if exp_dt and exp_dt < datetime.utcnow():
-                                # expired
-                                email_hdr = None
-                            else:
-                                email_hdr = sess.get('email')
+                                resolved_email = None
                         except Exception:
-                            email_hdr = sess.get('email')
-                    else:
-                        email_hdr = sess.get('email')
+                            pass
+                    cookie_email = resolved_email
             except Exception as e:
                 print(f"Warning: session lookup failed: {e}")
 
-        if not email_hdr:
-            email_hdr = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+
+        header_email = request.headers.get('x-user-email') or request.headers.get('X-User-Email')
+        preferred_email = cookie_email or header_email
+        payload = {'email': preferred_email} if preferred_email else None
+        user_email = _resolve_user_email(request, payload)
+
 
         with driver.session() as session:
             ensure_user_and_day(session, user_email)
@@ -1839,6 +2516,8 @@ async def api_signup(request: Request):
                     """,
                     id=user_id, name=name, email=email,
                 )
+                touch_user_login(session, email=email, name=name)
+                ensure_user_and_day(session, email=email, name=name)
         except Exception as e:
             print(f"Warning: could not create Neo4j user/profile: {e}")
 
@@ -2130,7 +2809,7 @@ async def api_reset_password(request: Request):
 
             if otp_expiry:
                 try:
-                    exp_dt = datetime.fromisoformat(otp_expiry)
+                    exp_dt = datetime.fromisoformat(str(otp_expiry))
                     if datetime.utcnow() > exp_dt:
                         raise HTTPException(status_code=410, detail='OTP expired')
                 except HTTPException:
@@ -2219,9 +2898,10 @@ async def api_notifications_mark_sent(request: Request):
         raise HTTPException(status_code=500, detail='Internal error')
 
 @app.get('/api/notifications/pending')
-async def api_notifications_pending():
-    """Get pending notifications with IST timezone support."""
+async def api_notifications_pending(request: Request, email: Optional[str] = None):
+    """Get pending notifications with IST timezone support (user-scoped)."""
     try:
+        user_email = _resolve_user_email(request, {'email': email} if email else None)
         now_utc = datetime.now(timezone.utc)
         now_ist = now_utc.astimezone(IST)
         
@@ -2229,7 +2909,7 @@ async def api_notifications_pending():
         
         with driver.session() as session:
             result = session.run("""
-                MATCH (t:Task)
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
                 WHERE t.status = 'pending' 
                 AND t.startTime IS NOT NULL
                 AND datetime(t.startTime) > datetime()
@@ -2238,7 +2918,7 @@ async def api_notifications_pending():
                        'start' AS type
                 ORDER BY t.startTime
                 LIMIT 20
-            """)
+            """, email=user_email)
             
             for record in result:
                 start_time = record['startTime']
@@ -2264,14 +2944,14 @@ async def api_notifications_pending():
                     })
             
             result = session.run("""
-                MATCH (t:Task)
+                MATCH (u:User {email: $email})-[:HAS_DAY]->(:Day)-[:HAS_TASK]->(t:Task)
                 WHERE t.status = 'pending' 
                 AND t.dueDate IS NOT NULL
                 RETURN t.id AS id, t.title AS title, t.dueDate AS dueDate,
                        'due' AS type
                 ORDER BY t.dueDate
                 LIMIT 50
-            """)
+            """, email=user_email)
             
             for record in result:
                 due_date = record['dueDate']
@@ -2331,21 +3011,24 @@ async def debug_tasks():
             tasks = [dict(r) for r in result]
             
             count_result = session.run("MATCH (t:Task) RETURN count(t) as total")
-            total = count_result.single()['total']
+            count_row = count_result.single()
+            total = count_row['total'] if count_row else 0
             
             pending_result = session.run("""
                 MATCH (t:Task) 
                 WHERE t.status = 'pending' 
                 RETURN count(t) as count
             """)
-            pending = pending_result.single()['count']
+            pending_row = pending_result.single()
+            pending = pending_row['count'] if pending_row else 0
             
             today = datetime.now(IST).date()
             today_result = session.run("""
                 MATCH (:Day {date: date($d)})-[:HAS_TASK]->(t:Task) 
                 RETURN count(t) as count
             """, d=today)
-            today_count = today_result.single()['count']
+            today_row = today_result.single()
+            today_count = today_row['count'] if today_row else 0
         
         return {
             'total_tasks': total,
@@ -2361,6 +3044,10 @@ async def debug_tasks():
 # --- Vector DB Population ---
 def populate_vector_db():
     """Populate vector database with task embeddings."""
+    if model is None:
+        print("Skipping vector DB population — embedding model not loaded.")
+        return
+
     with driver.session() as session:
         results = session.run("""
             MATCH (t:Task) 
@@ -2408,7 +3095,7 @@ async def extract_any_document(
         user_email = _resolve_user_email(request, {'email': email} if email else None)
         
         # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail='Only PDF files are supported')
         
         # Save file temporarily
@@ -2463,7 +3150,7 @@ async def upload_syllabus(
         user_email = _resolve_user_email(request, {'email': email} if email else None)
         
         # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail='Only PDF files are supported')
         
         # Save file
@@ -2522,7 +3209,7 @@ async def upload_academic_calendar(
     try:
         user_email = _resolve_user_email(request, {'email': email} if email else None)
         
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail='Only PDF files are supported')
         
         content = await file.read()
@@ -2587,7 +3274,7 @@ async def upload_exam_timetable(
     try:
         user_email = _resolve_user_email(request, {'email': email} if email else None)
         
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail='Only PDF files are supported')
         
         content = await file.read()
@@ -2646,7 +3333,7 @@ async def upload_all_documents(
         if not any([syllabus, calendar, exam_timetable]):
             raise HTTPException(status_code=400, detail='At least one document must be provided')
         
-        results = {
+        results: dict = {
             'syllabus': None,
             'calendar': None,
             'exam_timetable': None
@@ -2701,9 +3388,9 @@ async def upload_all_documents(
                             'name': e.name,
                             'date': e.date.isoformat() if hasattr(e.date, 'isoformat') else str(e.date),
                             'is_holiday': e.is_holiday,
-                            'is_exam': e.is_exam_period
+                            'is_exam': e.event_type == 'exam'
                         }
-                        for e in events[:20]  # Limit to 20 for display
+                        for e in events[:20]
                     ]
                 }
         
@@ -2725,7 +3412,8 @@ async def upload_all_documents(
                             'date': e.date.isoformat() if hasattr(e.date, 'isoformat') else str(e.date),
                             'start_time': e.start_time,
                             'end_time': e.end_time,
-                            'venue': e.venue
+                            'venue': e.venue,
+                            'exam_type': e.exam_type
                         }
                         for e in exams
                     ]
@@ -2756,7 +3444,7 @@ async def get_document_status(request: Request, email: Optional[str] = None):
         docs = USER_DOCUMENTS.get(user_email, {})
         constraints = USER_CONSTRAINTS.get(user_email)
         
-        status = {
+        status: dict = {
             'syllabus_uploaded': 'syllabus' in docs,
             'calendar_uploaded': 'calendar' in docs,
             'exam_timetable_uploaded': 'exam_timetable' in docs,

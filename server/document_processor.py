@@ -13,9 +13,22 @@ HYBRID EXTRACTION PIPELINE:
 
 import re
 import os
+import sys
 import json
 import time
 from datetime import datetime, timedelta
+
+# Force UTF-8 stdout/stderr so Unicode symbols don't crash on Windows cp1252
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -77,10 +90,11 @@ except ImportError:
 # Google Gemini AI
 try:
     import google.generativeai as genai
-    GEMINI_API_KEY = "AIzaSyCjdJbU8lCtZUT00P_uzQSrUw33tf9Ij6A"
-    genai.configure(api_key=GEMINI_API_KEY)
-    HAS_GEMINI = True
-    print("✅ Gemini AI configured")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+    HAS_GEMINI = bool(GEMINI_API_KEY)
+    print("✅ Gemini AI configured" if HAS_GEMINI else "⚠ Gemini AI skipped: GEMINI_API_KEY not set")
 except ImportError:
     HAS_GEMINI = False
     print("Info: google-generativeai not installed")
@@ -88,10 +102,10 @@ except ImportError:
 # Groq AI (Fast, generous free tier - 14,400 requests/day)
 try:
     from groq import Groq
-    GROQ_API_KEY = "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"
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     groq_client = None  # Will be initialized when key is set
-    HAS_GROQ = True
-    print("✅ Groq AI configured")
+    HAS_GROQ = bool(GROQ_API_KEY)
+    print("✅ Groq AI configured" if HAS_GROQ else "⚠ Groq AI skipped: GROQ_API_KEY not set")
 except ImportError:
     HAS_GROQ = False
     print("Info: groq not installed")
@@ -145,8 +159,8 @@ except ImportError:
 USE_LOCAL_NLP = True  # Always use local NLP for speed
 
 # --- LLM Whisperer Configuration ---
-LLM_WHISPERER_API_KEY = "8w28IQdKKKJ1EFGj4YGY9xVlavWgDahQrBgoCQ_FsTM"
-LLM_WHISPERER_BASE_URL = "https://llmwhisperer-api.us-central.unstract.com/api/v2"
+LLM_WHISPERER_API_KEY = os.getenv("LLM_WHISPERER_API_KEY")
+LLM_WHISPERER_BASE_URL = os.getenv("LLM_WHISPERER_BASE_URL", "https://llmwhisperer-api.us-central.unstract.com/api/v2")
 
 
 # ============================================================================

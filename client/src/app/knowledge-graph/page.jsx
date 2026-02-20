@@ -442,7 +442,7 @@ export default function KnowledgeGraphPage() {
     }, [email])
 
     const fetchGraph = useCallback(async (docFilter) => {
-        if (!email) return
+        if (!email) { setLoading(false); return }
         try {
             setLoading(true)
             const doc = docFilter !== undefined ? docFilter : selectedDoc
