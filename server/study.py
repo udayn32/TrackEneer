@@ -21,6 +21,12 @@ try:
 except Exception:
     genai = None
 
+try:
+    from weaviate_service import get_weaviate_service
+except ImportError:
+    def get_weaviate_service():
+        raise RuntimeError("Weaviate service not available")
+
 # --- FastAPI App Initialization ---
 app = FastAPI()
 
@@ -39,9 +45,8 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "demo@trackeneer.local")
 
 # Gemini (Google) configuration for study module
-# NOTE: Storing API keys in source is unsafe. Prefer setting GOOGLE_API_KEY/GEMINI_API_KEY in the environment.
-GEMINI_API_KEY = "AIzaSyDL1SqUudycymjYNnlm4z7ajfFkL3ht77k"
-if genai:
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel('gemini-2.5-flash')
@@ -118,7 +123,12 @@ def _get_note_node(note_id: str, email: Optional[str] = None):
 
 @app.get("/")
 def root():
-    return {"status": "Study module is running", "timestamp": _now_iso()}
+    weaviate_status = weaviate_health_check()
+    return {
+        "status": "Study module is running",
+        "timestamp": _now_iso(),
+        "weaviate": weaviate_status
+    }
 
 @app.get("/api/subjects")
 def get_subjects(request: Request, day: Optional[str] = None, email: Optional[str] = None):
@@ -185,6 +195,29 @@ async def create_subject(
         "dayDate": day_iso,
         "notesCount": 0,
     }
+    
+    # Index in Weaviate
+    try:
+        weaviate_svc = get_weaviate_service()
+        weaviate_svc.index_subject(
+            subject_id=subject_id,
+            name=name,
+            description=description or "",
+            owner_email=user_email,
+            created_at=created_at,
+        )
+    except Exception as e:
+        print(f"Warning: Failed to index subject in Weaviate: {e}")
+
+    # Index in BM25
+    try:
+        from app import bm25_subjects
+        text = f"{name} {description or ''}".strip()
+        if text:
+            bm25_subjects.index(subject_id, text)
+    except Exception as e:
+        print(f"Warning: Failed to index subject in BM25: {e}")
+
     return {"message": "Subject created successfully", "subject": subject}
 
 
@@ -228,6 +261,13 @@ def delete_subject(subject_id: str, request: Request, email: Optional[str] = Non
         file_path = UPLOAD_FOLDER / filename
         if file_path.exists():
             file_path.unlink()
+    
+    # Delete from Weaviate
+    try:
+        weaviate_svc = get_weaviate_service()
+        weaviate_svc.delete_subject(subject_id)
+    except Exception as e:
+        print(f"Warning: Failed to delete subject from Weaviate: {e}")
 
     return {"message": "Subject deleted successfully"}
 
@@ -367,6 +407,33 @@ async def upload_note(
         "dayDate": day_iso,
         "ownerEmail": user_email,
     }
+    
+    # Index in Weaviate
+    try:
+        weaviate_svc = get_weaviate_service()
+        weaviate_svc.index_note(
+            note_id=note_id,
+            subject_id=subject_id,
+            title=title or file.filename,
+            description=description or "",
+            file_path=file_path,
+            file_type=file_ext.replace(".", "").upper(),
+            filename=file.filename,
+            owner_email=user_email,
+            uploaded_at=uploaded_at,
+        )
+    except Exception as e:
+        print(f"Warning: Failed to index note in Weaviate: {e}")
+
+    # Index in BM25
+    try:
+        from app import bm25_notes
+        text = f"{title or file.filename} {description or ''}".strip()
+        if text:
+            bm25_notes.index(note_id, text)
+    except Exception as e:
+        print(f"Warning: Failed to index note in BM25: {e}")
+
     return {"message": "File uploaded successfully", "note": note}
 
 
@@ -443,6 +510,13 @@ def delete_note(note_id: str, request: Request, email: Optional[str] = None):
     file_path = UPLOAD_FOLDER / note["storedFilename"]
     if file_path.exists():
         file_path.unlink()
+    
+    # Delete from Weaviate
+    try:
+        weaviate_svc = get_weaviate_service()
+        weaviate_svc.delete_note(note_id)
+    except Exception as e:
+        print(f"Warning: Failed to delete note from Weaviate: {e}")
 
     return {"message": "Note deleted successfully"}
 
@@ -512,6 +586,7 @@ def get_study_stats(request: Request, email: Optional[str] = None):
         "totalSize": total_size,
         "fileTypes": {k: int(v) for k, v in file_type_counts.items()},
     }
+
 
 
 # ---------------------------
@@ -920,6 +995,72 @@ def api_clean_paper_names(request_data: ScheduleRequest):
         tb = traceback.format_exc()
         print(f"Error cleaning paper names: {e}\n{tb}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/search/notes")
+def semantic_search_notes(
+    request: Request,
+    query: str,
+    limit: int = 10,
+    subject_id: Optional[str] = None,
+    email: Optional[str] = None,
+):
+    """Perform semantic search on notes using Weaviate."""
+    user_email = _resolve_user_email(request, email)
+    try:
+        weaviate_svc = get_weaviate_service()
+        results = weaviate_svc.semantic_search_notes(
+            query=query,
+            owner_email=user_email,
+            limit=limit,
+            subject_id=subject_id,
+        )
+        return {"query": query, "results": results, "count": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.get("/api/search/subjects")
+def semantic_search_subjects(
+    request: Request,
+    query: str,
+    limit: int = 10,
+    email: Optional[str] = None,
+):
+    """Perform semantic search on subjects using Weaviate."""
+    user_email = _resolve_user_email(request, email)
+    try:
+        weaviate_svc = get_weaviate_service()
+        results = weaviate_svc.semantic_search_subjects(
+            query=query,
+            owner_email=user_email,
+            limit=limit,
+        )
+        return {"query": query, "results": results, "count": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.get("/api/notes/{note_id}/similar")
+def get_similar_notes(
+    note_id: str,
+    request: Request,
+    limit: int = 5,
+    email: Optional[str] = None,
+):
+    """Find notes similar to the given note using vector similarity."""
+    user_email = _resolve_user_email(request, email)
+    try:
+        weaviate_svc = get_weaviate_service()
+        results = weaviate_svc.get_similar_notes(
+            note_id=note_id,
+            owner_email=user_email,
+            limit=limit,
+        )
+        return {"noteId": note_id, "similar": results, "count": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to find similar notes: {str(e)}")
+
 
 
 if __name__ == "__main__":

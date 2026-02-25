@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
-from fastapi import FastAPI
+# Load .env before any module imports so all os.getenv() calls see the values
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass  # dotenv not installed; rely on system environment variables
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from db import close_driver
+from bm25_index import BM25Index
+from db import close_driver, get_driver
 from insights import app as insights_app
 from placement import app as placement_app
 from scheduler import app as scheduler_app
@@ -48,6 +57,11 @@ from document_processor import DocumentProcessor, llm_whisperer, ai_extractor
 doc_processor = DocumentProcessor()
 
 ALLOWED_ORIGINS = ["http://localhost:3000"]
+
+# ── BM25 Search Index ────────────────────────────────────────────────
+bm25_tasks = BM25Index()
+bm25_notes = BM25Index()
+bm25_subjects = BM25Index()
 
 app = FastAPI(title="TrackEneer Unified API")
 app.add_middleware(
@@ -154,6 +168,116 @@ async def document_processor_status() -> dict:
             "Exam Timetable PDF → exam schedule"
         ]
     }
+
+
+# ── BM25 Population ─────────────────────────────────────────────────
+def _populate_bm25():
+    """Load existing Neo4j data into the BM25 indexes on startup."""
+    driver = get_driver()
+    with driver.session() as session:
+        # Index tasks
+        records = session.run(
+            "MATCH (t:Task) RETURN t.id AS id, t.title AS title, t.description AS desc"
+        ).data()
+        for r in records:
+            text = f"{r.get('title') or ''} {r.get('desc') or ''}".strip()
+            if text and r.get("id"):
+                bm25_tasks.index(r["id"], text)
+
+        # Index notes
+        records = session.run(
+            "MATCH (n:Note) RETURN n.id AS id, n.title AS title, n.description AS desc"
+        ).data()
+        for r in records:
+            text = f"{r.get('title') or ''} {r.get('desc') or ''}".strip()
+            if text and r.get("id"):
+                bm25_notes.index(r["id"], text)
+
+        # Index subjects
+        records = session.run(
+            "MATCH (s:Subject) RETURN s.id AS id, s.name AS name, s.description AS desc"
+        ).data()
+        for r in records:
+            text = f"{r.get('name') or ''} {r.get('desc') or ''}".strip()
+            if text and r.get("id"):
+                bm25_subjects.index(r["id"], text)
+
+    print(
+        f"✓ BM25 indexes populated: "
+        f"{bm25_tasks.doc_count} tasks, "
+        f"{bm25_notes.doc_count} notes, "
+        f"{bm25_subjects.doc_count} subjects"
+    )
+
+
+@app.on_event("startup")
+async def startup_populate_bm25() -> None:
+    try:
+        _populate_bm25()
+    except Exception as e:
+        print(f"⚠ BM25 population skipped: {e}")
+
+
+# ── Unified BM25 Search Endpoint ────────────────────────────────────
+@app.get("/api/search")
+async def bm25_search(
+    request: Request,
+    q: str,
+    top_k: int = 10,
+    category: Optional[str] = None,
+):
+    """
+    Search across tasks, notes, and subjects using BM25 ranking.
+
+    Query params:
+      - q: search query (required)
+      - top_k: max results per category (default 10)
+      - category: 'tasks', 'notes', or 'subjects' to limit scope
+    """
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required.")
+
+    results: dict[str, list] = {}
+
+    if category in (None, "tasks"):
+        results["tasks"] = [
+            {"id": doc_id, "score": round(score, 4)}
+            for doc_id, score in bm25_tasks.search(q, top_k=top_k)
+        ]
+
+    if category in (None, "notes"):
+        results["notes"] = [
+            {"id": doc_id, "score": round(score, 4)}
+            for doc_id, score in bm25_notes.search(q, top_k=top_k)
+        ]
+
+    if category in (None, "subjects"):
+        results["subjects"] = [
+            {"id": doc_id, "score": round(score, 4)}
+            for doc_id, score in bm25_subjects.search(q, top_k=top_k)
+        ]
+
+    total = sum(len(v) for v in results.values())
+    return {"query": q, "total": total, "results": results}
+
+
+@app.post("/api/search/reindex")
+async def reindex_bm25():
+    """Re-populate BM25 indexes from Neo4j (e.g. after bulk data changes)."""
+    global bm25_tasks, bm25_notes, bm25_subjects
+    bm25_tasks = BM25Index()
+    bm25_notes = BM25Index()
+    bm25_subjects = BM25Index()
+    try:
+        _populate_bm25()
+        return {
+            "status": "ok",
+            "tasks": bm25_tasks.doc_count,
+            "notes": bm25_notes.doc_count,
+            "subjects": bm25_subjects.doc_count,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reindex failed: {e}")
 
 
 @app.on_event("shutdown")
