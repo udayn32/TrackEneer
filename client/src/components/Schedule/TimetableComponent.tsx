@@ -5,6 +5,43 @@ import { useSession } from "next-auth/react";
 
 const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
 
+/**
+ * TimetableComponent - An AI-powered study schedule generator with document extraction
+ * 
+ * @component
+ * @description
+ * A comprehensive React component that manages the entire workflow for generating optimized study schedules.
+ * It handles:
+ * 1. **Syllabus Management**: Upload and extract course/subject information from PDF files using OCR + AI
+ * 2. **Exam Timetable Extraction**: Parse exam dates, times, and venues from timetable PDFs
+ * 3. **Schedule Generation**: Use NSGA-II (multi-objective genetic algorithm) to create an optimized 2-month study plan
+ * 4. **Calendar Integration**: Save generated schedules to user's calendar
+ * 5. **Knowledge Graph Integration**: Store timetables in the system's knowledge graph for future reference
+ * 
+ * @state
+ * - `loading` - Shows loading state during file uploads
+ * - `message` - Toast notification system (info/success/error)
+ * - `syllabusFile`, `examTimetableFile` - Currently selected PDF files
+ * - `extractedCourses`, `extractedExams` - Parsed data from uploaded documents
+ * - `dragActive` - Tracks drag-and-drop state
+ * - `activeTab` - Controls which tab is displayed (syllabus/exams/schedule)
+ * - `studySchedule` - Generated 2-month study plan with daily sessions and tasks
+ * - `generatingSchedule`, `saving`, `addingToSystem` - Loading states for async operations
+ * 
+ * @features
+ * - **Drag & Drop Upload**: Intuitive file upload experience
+ * - **AI Document Parsing**: Extracts structured data from unstructured PDFs
+ * - **Multi-Objective Optimization**: NSGA-II algorithm balances multiple study goals
+ * - **Intelligent Task Breakdown**: Splits each study session into typed tasks (learn/practice/review/notes)
+ * - **Priority-Based Scheduling**: High-priority exams get more study time
+ * - **Weekend Awareness**: Considers weekends differently in scheduling
+ * - **User Privacy**: Files are processed temporarily and deleted after extraction
+ * 
+ * @requires useSession from next-auth (for email identification)
+ * @requires API_BASE environment variable for backend communication
+ * 
+ * @returns {JSX.Element} Three-tab interface with upload, extraction, and schedule display areas
+ */
 export const TimetableComponent = () => {
     const { data: session } = useSession();
     const [loading, setLoading] = useState(false);
@@ -15,9 +52,12 @@ export const TimetableComponent = () => {
     const [extractedExams, setExtractedExams] = useState<any[]>([]);
     const [dragActive, setDragActive] = useState(false);
     const [activeTab, setActiveTab] = useState("syllabus");
+    const [scheduleOptions, setScheduleOptions] = useState<any[]>([]);  // All NSGA-II Pareto plans
+    const [selectedPlanIndex, setSelectedPlanIndex] = useState(0);       // Which plan the user selected
     const [studySchedule, setStudySchedule] = useState<any | null>(null);
     const [generatingSchedule, setGeneratingSchedule] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [addingToSystem, setAddingToSystem] = useState(false);
 
     const userEmail = session?.user?.email || "demo@trackeneer.local";
 
@@ -152,27 +192,45 @@ export const TimetableComponent = () => {
 
             const result = await response.json();
 
-            const schedule = result.schedule.map((day: any) => ({
+            // NSGA-II returns { schedules: [ {id, label, schedule, objectives, ...}, ... ] }
+            const rawSchedules = result.schedules || (result.schedule ? [{ id: 'default', label: 'Study Plan', schedule: result.schedule }] : []);
+
+            if (!rawSchedules.length) {
+                throw new Error("No schedules returned from the optimizer");
+            }
+
+            const parseDaySchedule = (day: any) => ({
                 date: new Date(day.date),
                 dateLabel: day.date_label,
                 isWeekend: day.is_weekend,
-                sessions: day.sessions.map((sess: any) => ({
+                sessions: (day.sessions || []).map((sess: any) => ({
                     subject: sess.subject,
                     hours: sess.hours,
                     startTime: sess.start_time,
                     endTime: sess.end_time,
                     priority: sess.priority,
                     daysUntilExam: sess.days_until_exam,
-                    tasks: sess.tasks.map((t: any) => ({
+                    tasks: (sess.tasks || []).map((t: any) => ({
                         task: t.task,
                         duration: t.duration,
                         type: t.type
                     }))
                 }))
+            });
+
+            const parsedOptions = rawSchedules.map((opt: any) => ({
+                id: opt.id,
+                label: opt.label,
+                objectives: opt.objectives || {},
+                numDays: opt.num_days,
+                numSubjects: opt.num_subjects,
+                days: (opt.schedule || []).map(parseDaySchedule)
             }));
 
-            setStudySchedule(schedule);
-            showMessage(`✅ Study schedule generated for ${schedule.length} days!`, "success");
+            setScheduleOptions(parsedOptions);
+            setSelectedPlanIndex(0);
+            setStudySchedule(parsedOptions[0].days);
+            showMessage(`✅ ${parsedOptions.length} optimized plans generated (${parsedOptions[0].days.length} days each)!`, "success");
             setActiveTab("schedule");
 
         } catch (err: any) {
@@ -220,6 +278,52 @@ export const TimetableComponent = () => {
             showMessage(`Error saving schedule: ${err.message}`, "error");
         } finally {
             setSaving(false);
+        }
+    };
+
+    const addToKnowledgeGraph = async () => {
+        if (!studySchedule || studySchedule.length === 0) return;
+        setAddingToSystem(true);
+        showMessage("Adding timetable to knowledge graph...", "info");
+
+        try {
+            const formattedSchedule = studySchedule.map((day: any) => ({
+                date: day.date instanceof Date ? day.date.toISOString().split('T')[0] : day.date,
+                sessions: day.sessions.map((s: any) => ({
+                    subject: s.subject,
+                    start_time: s.startTime,
+                    end_time: s.endTime,
+                    hours: s.hours,
+                    priority: s.priority,
+                    days_until_exam: s.daysUntilExam,
+                    tasks: s.tasks
+                }))
+            }));
+
+            const res = await fetch(`${API_BASE}/api/study/add-to-knowledge-graph`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    schedule: formattedSchedule,
+                    email: userEmail,
+                    name: `NSGA-II Timetable (${new Date().toLocaleDateString()})`
+                })
+            });
+
+            const data = await res.json();
+
+            if (res.ok) {
+                showMessage(
+                    `\u2705 Added to system! ${data.totalSessions} sessions, ${data.totalHours}h across ${data.subjects?.length || 0} subjects linked to knowledge graph.`,
+                    "success"
+                );
+            } else {
+                throw new Error(data.detail || "Failed to add to knowledge graph");
+            }
+        } catch (err: any) {
+            showMessage(`Error: ${err.message}`, "error");
+        } finally {
+            setAddingToSystem(false);
         }
     };
 
@@ -368,17 +472,64 @@ export const TimetableComponent = () => {
                                         Based on {extractedExams.length} extracted exams
                                     </p>
 
+                                    {/* Plan selector tabs (shown when multiple NSGA-II solutions exist) */}
+                                    {scheduleOptions.length > 1 && (
+                                        <div className="space-y-2">
+                                            <p className="text-xs text-slate-400 font-semibold">Choose a plan:</p>
+                                            <div className="grid grid-cols-1 gap-2">
+                                                {scheduleOptions.map((opt, idx) => (
+                                                    <button
+                                                        key={opt.id}
+                                                        onClick={() => {
+                                                            setSelectedPlanIndex(idx);
+                                                            setStudySchedule(opt.days);
+                                                        }}
+                                                        className={`w-full text-left px-4 py-3 rounded-lg border text-sm font-medium transition-all ${
+                                                            idx === selectedPlanIndex
+                                                                ? "border-green-500/50 bg-green-500/10 text-green-400"
+                                                                : "border-slate-700 bg-slate-800/50 text-slate-300 hover:border-slate-500"
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center justify-between">
+                                                            <span>{idx === 0 ? "⚖️" : idx === 1 ? "😌" : "🎯"} {opt.label}</span>
+                                                            {idx === selectedPlanIndex && <span className="text-green-400 text-xs">✓ Selected</span>}
+                                                        </div>
+                                                        {opt.objectives && (
+                                                            <div className="flex gap-3 mt-1 text-[10px] text-slate-500">
+                                                                <span>Cramming: {opt.objectives.cramming?.toFixed(2) ?? '—'}</span>
+                                                                <span>Switching: {opt.objectives.switching?.toFixed(2) ?? '—'}</span>
+                                                                <span>Revision: {opt.objectives.revision?.toFixed(2) ?? '—'}</span>
+                                                            </div>
+                                                        )}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {studySchedule && studySchedule.length > 0 && (
-                                        <button
-                                            onClick={saveScheduleToCalendar}
-                                            disabled={saving}
-                                            className={`w-full px-4 py-3 rounded-lg font-bold text-sm transition-all ${saving
-                                                ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                                                : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20"
-                                                }`}
-                                        >
-                                            {saving ? "Saving..." : "💾 Save Tasks to Calendar"}
-                                        </button>
+                                        <div className="space-y-2">
+                                            <button
+                                                onClick={saveScheduleToCalendar}
+                                                disabled={saving}
+                                                className={`w-full px-4 py-3 rounded-lg font-bold text-sm transition-all ${saving
+                                                    ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                                                    : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20"
+                                                    }`}
+                                            >
+                                                {saving ? "Saving..." : "💾 Save Tasks to Calendar"}
+                                            </button>
+                                            <button
+                                                onClick={addToKnowledgeGraph}
+                                                disabled={addingToSystem}
+                                                className={`w-full px-4 py-3 rounded-lg font-bold text-sm transition-all ${addingToSystem
+                                                    ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                                                    : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg shadow-purple-500/20"
+                                                    }`}
+                                            >
+                                                {addingToSystem ? "⏳ Adding..." : "🧠 Add to System"}
+                                            </button>
+                                        </div>
                                     )}
                                 </div>
                             )}

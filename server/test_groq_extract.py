@@ -7,7 +7,7 @@ GROQ_API_KEY = "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"
 
 def test_groq():
     # Extract text from PDF
-    pdf_path = r"C:\Users\udayn\OneDrive\Desktop\computer-engineering-syllabus-sem-iv-mumbai-university.pdf"
+    pdf_path = r"C:\Users\himan\Downloads\Learning\Projects\TrackEneer Uday\TrackEneer\server\uploads\fa04c2fa-392a-4c37-9b91-5e6ca92ea3a9.pdf"
     
     with pdfplumber.open(pdf_path) as pdf:
         text = '\n'.join([p.extract_text() or '' for p in pdf.pages])

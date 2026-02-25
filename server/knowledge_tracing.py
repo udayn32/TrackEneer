@@ -36,7 +36,9 @@ from graph_helpers import ensure_user_and_day, normalize_day
 # ─── Gemini for quiz generation ───
 try:
     import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "AIzaSyDL1SqUudycymjYNnlm4z7ajfFkL3ht77k"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY not set")
     genai.configure(api_key=GEMINI_API_KEY)
     _gemini = genai.GenerativeModel("gemini-2.5-flash")
     HAS_GEMINI = True

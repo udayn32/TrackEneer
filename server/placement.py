@@ -25,8 +25,9 @@ app.add_middleware(
 )
 
 # --- Configuration ---
-# API Key from Google AI Studio - Placement module
-GEMINI_API_KEY = "AIzaSyCjdJbU8lCtZUT00P_uzQSrUw33tf9Ij6A"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set. Add it to your .env file.")
 genai.configure(api_key=GEMINI_API_KEY)
 # Using Gemini 2.5 Flash - fast and efficient
 model = genai.GenerativeModel('gemini-2.5-flash')

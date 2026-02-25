@@ -34,6 +34,8 @@ __pycache__/
 .mypy_cache/
 venv/
 .venv/
+.venv311/
+venv311/
 env/
 ENV/
 pip-log.txt
@@ -86,4 +88,36 @@ notification-service/dist/
 .cache/
 .tmp/
 .envrc
+
+# Documentation / markdown files
+*.md
+COGNITIVE_ECOSYSTEM_PLAN.md
+DASHBOARD_REDESIGN.md
+DEBUG_SCHEDULE.md
+INSIGHTS_MODULE_README.md
+NOTIFICATION_FIX.md
+PLACEMENT_MODULE_README.md
+PROJECT_REPORT.md
+RESEARCH_PAPER_PROMPT.md
+STUDY_MODULE_README.md
+TASK_SCHEDULE_DEBUG.md
+WEAVIATE_INTEGRATION.md
+report_and_research/README_DIAGRAMS.md
+
+# Batch / script files
+*.bat
+start_app.bat
+server/start_insights.bat
+server/start_placement.bat
+server/start_study.bat
+notification-service/start.bat
+
+# Test / debug files
+server/test_*.py
+server/debug_*.py
+server/inspect_*.py
+server/benchmark_*.py
+server/benchmark_results.json
+server/tmp_payload.json
+server/list_models.py
 
