@@ -6,8 +6,9 @@ import Image from "next/image";
 import { TimetableComponent } from "@/components/Schedule/TimetableComponent";
 
 const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
+const NOTIFICATION_SERVICE = process.env.NEXT_PUBLIC_NOTIFICATION_SERVICE?.replace(/\/$/, "") || "http://localhost:3001";
 
-const fallbackAvatar = "https://avatars.dicebear.com/api/miniavs/trackeneer.svg";
+const fallbackAvatar = "https://api.dicebear.com/9.x/thumbs/svg?seed=trackeneer";
 
 type Quote = {
   content: string;
@@ -344,12 +345,19 @@ const SchedulePage = () => {
 
     const ensureSwAndSubscribe = async () => {
       try {
+        // If the standalone notification service is not running, skip push setup quietly.
+        const health = await fetch(`${NOTIFICATION_SERVICE}/health`).catch(() => null);
+        if (!health?.ok) {
+          console.info("Notification service is unavailable; skipping push subscription setup.");
+          return;
+        }
+
         // register service worker
         const reg = await navigator.serviceWorker.register('/sw.js');
         console.log('Service worker registered (client):', reg.scope);
 
         // get vapid key from notification service
-        const res = await fetch((process.env.NEXT_PUBLIC_NOTIFICATION_SERVICE || 'http://localhost:3001') + '/vapid-public-key');
+        const res = await fetch(`${NOTIFICATION_SERVICE}/vapid-public-key`);
         if (!res.ok) throw new Error('Failed to get VAPID key');
         const body = await res.json();
         const vapidKey = body.publicKey;
@@ -379,7 +387,7 @@ const SchedulePage = () => {
           console.log('Push subscription obtained (client)', sub.endpoint);
           // send to backend notification service and log response
           try {
-            const r = await fetch((process.env.NEXT_PUBLIC_NOTIFICATION_SERVICE || 'http://localhost:3001') + '/subscribe', {
+            const r = await fetch(`${NOTIFICATION_SERVICE}/subscribe`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ subscription: sub, userId: 'guest' })
@@ -559,15 +567,7 @@ const SchedulePage = () => {
             >
               <span className="mr-2">📚</span>Timetable & Syllabus
             </button>
-            {[
-              { label: "Study", icon: "📖", path: "/study" },
-              { label: "Placement", icon: "🎯", path: "/placement" },
-              { label: "Insights", icon: "💡", path: "/insights" },
-            ].map((item) => (
-              <button key={item.label} className="w-full text-left px-4 py-3 rounded-lg text-slate-300 hover:bg-slate-700 hover:text-cyan-400 transition-all duration-200 font-medium text-sm">
-                <span className="mr-2">{item.icon}</span>{item.label}
-              </button>
-            ))}
+        
           </nav>
         </div>
         <button className="w-full px-4 py-3 rounded-lg text-slate-300 hover:bg-red-900/30 hover:text-red-400 transition-all duration-200 font-medium text-sm">🚪 Logout</button>

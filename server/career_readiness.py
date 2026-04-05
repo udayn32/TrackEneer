@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env from cwd (server/)
@@ -29,6 +31,21 @@ from typing import Optional, List
 import httpx
 from fastapi import FastAPI, Form, HTTPException, Query, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+
+from ai_client import build_text_model
+# Import career center service for unified company logic
+from career_center_service import (
+    resolve_user_email,
+    fetch_company,
+    store_company,
+    is_cache_valid,
+    list_companies,
+    delete_company,
+    generate_company_info,
+    generate_company_score,
+    get_alumni_data,
+    _company_key,
+)
 
 # ─── PDF Extraction ───
 try:
@@ -40,16 +57,9 @@ except ImportError:
 
 # ─── Gemini ───
 try:
-    import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini = genai.GenerativeModel("gemini-2.5-flash")
-        HAS_GEMINI = True
-    else:
-        HAS_GEMINI = False
-        _gemini = None
-except ImportError:
+    _gemini = build_text_model()
+    HAS_GEMINI = _gemini is not None
+except Exception:
     HAS_GEMINI = False
     _gemini = None
 
@@ -58,6 +68,9 @@ BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_NEWS_URL   = "https://api.search.brave.com/res/v1/news/search"
 BRAVE_VIDEO_URL  = "https://api.search.brave.com/res/v1/videos/search"
+
+# ─── Graph Helpers ───
+from graph_helpers import normalize_day
 
 
 # Job role templates
@@ -196,7 +209,7 @@ async def analyze_resume_pdf(
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     if not HAS_GEMINI or not _gemini:
-        raise HTTPException(status_code=503, detail="Gemini is not available for resume analysis.")
+        raise HTTPException(status_code=503, detail="AI model is not available for resume analysis.")
 
     # Read and extract text from PDF
     contents = await file.read()
@@ -216,7 +229,30 @@ async def analyze_resume_pdf(
 
     role = JOB_ROLE_REQUIREMENTS.get(target_role, JOB_ROLE_REQUIREMENTS["software_engineer"])
 
-    prompt = f"""Analyze this resume against the requirements for a {role['title']} position.
+    prompt = _build_resume_analysis_prompt(role, resume_text)
+
+    try:
+        response = _gemini.generate_content(prompt)
+        data = _parse_resume_analysis_json(getattr(response, "text", ""))
+        return {"status": "ok", "analysis": data, "target_role": role["title"], "extracted_chars": len(resume_text)}
+    except Exception:
+        try:
+            retry_prompt = _build_resume_analysis_prompt(role, resume_text, strict_json=True)
+            retry_response = _gemini.generate_content(retry_prompt)
+            data = _parse_resume_analysis_json(getattr(retry_response, "text", ""))
+            return {"status": "ok", "analysis": data, "target_role": role["title"], "extracted_chars": len(resume_text)}
+        except Exception:
+            fallback = _build_fallback_resume_analysis(role, resume_text)
+            return {"status": "ok", "analysis": fallback, "target_role": role["title"], "extracted_chars": len(resume_text), "fallback": True}
+
+
+def _build_resume_analysis_prompt(role: dict, resume_text: str, strict_json: bool = False) -> str:
+    json_clause = (
+        "Return only valid JSON. Do not use markdown fences. Do not add explanations before or after the JSON."
+        if strict_json
+        else "Return JSON:"
+    )
+    return f"""Analyze this resume against the requirements for a {role['title']} position.
 
 Required Skills: {', '.join(role['required_skills'])}
 Preferred Skills: {', '.join(role['preferred_skills'])}
@@ -224,7 +260,7 @@ Preferred Skills: {', '.join(role['preferred_skills'])}
 Resume:
 {resume_text[:3000]}
 
-Return JSON:
+{json_clause}
 {{
   "matched_skills": ["skill1", "skill2"],
   "missing_required": ["skill3"],
@@ -235,15 +271,129 @@ Return JSON:
   "interview_tips": ["tip1", "tip2"]
 }}
 """
+
+
+def _build_fallback_resume_analysis(role: dict, resume_text: str) -> dict:
+    """Produce a basic but stable resume analysis without relying on model JSON output."""
+    normalized_resume = f" {resume_text.lower()} "
+
+    def _present(skill: str) -> bool:
+        variants = {skill.lower()}
+        lowered = skill.lower()
+        if lowered == "javascript":
+            variants.update({"js", "node.js", "nodejs"})
+        elif lowered == "html/css":
+            variants.update({"html", "css"})
+        elif lowered == "rest apis":
+            variants.update({"rest api", "apis", "api development"})
+        elif lowered == "ci/cd":
+            variants.update({"ci", "cd", "github actions", "jenkins"})
+        elif lowered == "aws":
+            variants.update({"amazon web services"})
+        elif lowered == "data structures":
+            variants.update({"dsa", "data structure"})
+        elif lowered == "algorithms":
+            variants.update({"algorithm"})
+        return any(f" {variant} " in normalized_resume for variant in variants)
+
+    matched_required = [skill for skill in role["required_skills"] if _present(skill)]
+    matched_preferred = [skill for skill in role["preferred_skills"] if _present(skill)]
+    missing_required = [skill for skill in role["required_skills"] if skill not in matched_required]
+    missing_preferred = [skill for skill in role["preferred_skills"] if skill not in matched_preferred]
+
+    required_weight = 0.75
+    preferred_weight = 0.25
+    required_score = (len(matched_required) / max(1, len(role["required_skills"]))) * required_weight
+    preferred_score = (len(matched_preferred) / max(1, len(role["preferred_skills"]))) * preferred_weight
+    overall_match_percentage = int(round((required_score + preferred_score) * 100))
+
+    strengths = []
+    if matched_required:
+        strengths.append(f"Your resume already shows core role skills such as {', '.join(matched_required[:4])}.")
+    if re.search(r"\b(project|internship|experience|developer|engineer)\b", normalized_resume):
+        strengths.append("Your resume appears to include project or experience signals that help in screening.")
+    if re.search(r"\b(github|portfolio|hackathon|certification|certified)\b", normalized_resume):
+        strengths.append("Portfolio, certifications, or public work can strengthen your profile.")
+
+    improvements = []
+    if missing_required:
+        improvements.append(f"Add stronger evidence for key required skills like {', '.join(missing_required[:4])}.")
+    if not re.search(r"\b(achievement|improved|reduced|increased|built|developed)\b", normalized_resume):
+        improvements.append("Rewrite bullets to include actions and measurable outcomes.")
+    if not re.search(r"\b(sql|database|api|cloud|docker|aws|react|python|java)\b", normalized_resume):
+        improvements.append("Add more role-relevant technical detail to your projects and experience sections.")
+
+    interview_tips = []
+    if matched_required:
+        interview_tips.append(f"Be ready to explain where you used {matched_required[0]} in a project or internship.")
+    if missing_required:
+        interview_tips.append(f"Prepare concise answers around {missing_required[0]} and how you are learning it.")
+    interview_tips.append("Practice a 60-second walkthrough of your resume focusing on impact, tools, and problem-solving.")
+
+    return {
+        "matched_skills": matched_required + matched_preferred[:2],
+        "missing_required": missing_required,
+        "missing_preferred": missing_preferred,
+        "strengths": strengths[:3] or ["Your resume contains some role-relevant technical signals."],
+        "improvements": improvements[:3] or ["Add clearer evidence for role-specific skills and quantified impact."],
+        "overall_match_percentage": max(0, min(overall_match_percentage, 100)),
+        "interview_tips": interview_tips[:3],
+    }
+
+
+def _parse_resume_analysis_json(raw_text: str) -> dict:
+    """Extract the first JSON object from a model response and normalize it."""
+    raw = (raw_text or "").strip()
+    if not raw:
+        raise ValueError("The AI model returned an empty response.")
+
+    raw = re.sub(r"```json\s*", "", raw, flags=re.IGNORECASE | re.MULTILINE)
+    raw = re.sub(r"```+\s*", "", raw, flags=re.MULTILINE)
+    raw = raw.strip()
+
+    candidates = [raw]
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.insert(0, raw[start : end + 1])
+
+    decoder = json.JSONDecoder()
+    parsed = None
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+
+    if not isinstance(parsed, dict):
+        raise ValueError("The AI response was not valid JSON for resume analysis.")
+
+    def _list_of_strings(value):
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [line.strip("- ").strip() for line in value.splitlines() if line.strip()]
+        return []
+
     try:
-        response = _gemini.generate_content(prompt)
-        raw = response.text.strip()
-        raw = re.sub(r"```json\s*", "", raw, flags=re.MULTILINE)
-        raw = re.sub(r"```\s*", "", raw, flags=re.MULTILINE)
-        data = json.loads(raw.strip())
-        return {"status": "ok", "analysis": data, "target_role": role["title"], "extracted_chars": len(resume_text)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        match_pct = int(float(parsed.get("overall_match_percentage", 0)))
+    except (TypeError, ValueError):
+        match_pct = 0
+
+    return {
+        "matched_skills": _list_of_strings(parsed.get("matched_skills")),
+        "missing_required": _list_of_strings(parsed.get("missing_required")),
+        "missing_preferred": _list_of_strings(parsed.get("missing_preferred")),
+        "strengths": _list_of_strings(parsed.get("strengths")),
+        "improvements": _list_of_strings(parsed.get("improvements")),
+        "overall_match_percentage": max(0, min(match_pct, 100)),
+        "interview_tips": _list_of_strings(parsed.get("interview_tips")),
+    }
 
 
 # ─── Brave Search helpers ───
@@ -304,6 +454,188 @@ async def _brave_fetch(url: str, query: str, count: int = 8) -> list[dict]:
     return items
 
 
+async def _google_news_search(query: str, count: int = 6, item_type: str = "news") -> list[dict]:
+    """Fetch lightweight live results from Google News RSS without an API key."""
+    rss_url = (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            resp = await client.get(rss_url)
+            resp.raise_for_status()
+    except Exception:
+        return []
+
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError:
+        return []
+
+    items: list[dict] = []
+    for entry in root.findall("./channel/item")[:count]:
+        source_el = entry.find("source")
+        items.append({
+            "type": item_type,
+            "title": (entry.findtext("title") or "").strip(),
+            "url": (entry.findtext("link") or "").strip(),
+            "description": (entry.findtext("description") or "").strip(),
+            "age": (entry.findtext("pubDate") or "").strip(),
+            "source": (source_el.text or "").strip() if source_el is not None else "Google News",
+            "thumbnail": "",
+        })
+    return items
+
+
+def _video_search_links(role_title: str, top_skills: list[str]) -> list[dict]:
+    """Provide direct search links for video-style resources when no video API is configured."""
+    queries = [
+        f"{role_title} interview tips",
+        f"{role_title} roadmap 2026",
+    ]
+    if top_skills:
+        queries.insert(0, f"{' '.join(top_skills[:3])} tutorial")
+
+    links: list[dict] = []
+    for query in queries[:3]:
+        links.append({
+            "type": "video",
+            "title": query,
+            "url": f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+            "description": "Open this search to find recent walkthroughs, mock interviews, and explainers related to your target role.",
+            "age": "Live search",
+            "source": "YouTube Search",
+            "thumbnail": "",
+        })
+    return links
+
+
+async def _public_trends_search(role_title: str, top_skills: list[str]) -> dict:
+    """Use public no-key search sources when Brave Search is unavailable."""
+    skill_query = " OR ".join(top_skills) if top_skills else role_title
+    career_query = f"{role_title} technology hiring trends 2026"
+    interview_query = f"{role_title} interview preparation tips"
+
+    import asyncio
+
+    skill_news_task = _google_news_search(f"{skill_query} technology trends", 6, "news")
+    career_web_task = _google_news_search(career_query, 6, "article")
+    interview_web_task = _google_news_search(interview_query, 6, "tip")
+
+    skill_news, career_web, interview_web = await asyncio.gather(
+        skill_news_task,
+        career_web_task,
+        interview_web_task,
+    )
+    videos = _video_search_links(role_title, top_skills)
+
+    results = {
+        "status": "ok",
+        "role": role_title,
+        "skills_searched": top_skills,
+        "fallback": False,
+        "source": "public-search",
+        "message": "Showing live results from public search sources because Brave Search is not configured.",
+        "sections": {
+            "skill_news": skill_news,
+            "career_articles": career_web,
+            "interview_tips": interview_web,
+            "videos": videos,
+        },
+    }
+
+    if any(results["sections"].values()):
+        return results
+    return _fallback_trends(role_title, top_skills)
+
+
+def _fallback_trends(role_title: str, top_skills: list[str]) -> dict:
+    """Return a UI-compatible fallback when live Brave Search is unavailable."""
+    focus_skills = top_skills[:4]
+    skill_label = ", ".join(focus_skills) if focus_skills else role_title
+
+    return {
+        "status": "ok",
+        "role": role_title,
+        "skills_searched": top_skills,
+        "fallback": True,
+        "message": "Live trend search is unavailable right now, so showing built-in guidance instead.",
+        "sections": {
+            "skill_news": [
+                {
+                    "type": "note",
+                    "title": f"Focus your weekly practice on {skill_label}",
+                    "url": "",
+                    "description": "Spend this week strengthening the skills most closely tied to your target role through projects, revision, and interview-style problem solving.",
+                    "age": "TrackEneer guidance",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+                {
+                    "type": "note",
+                    "title": f"Build one proof-of-work item for {role_title}",
+                    "url": "",
+                    "description": "Create or improve a small portfolio project, GitHub repo, case study, or resume bullet that demonstrates measurable progress for this role.",
+                    "age": "TrackEneer guidance",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+            ],
+            "career_articles": [
+                {
+                    "type": "article",
+                    "title": f"What recruiters usually expect from an entry-level {role_title}",
+                    "url": "",
+                    "description": "Review core fundamentals, communication clarity, and project evidence. Employers usually value clear basics plus one or two standout strengths over broad but shallow coverage.",
+                    "age": "Evergreen",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+                {
+                    "type": "article",
+                    "title": "Turn resume gaps into a 2-week improvement plan",
+                    "url": "",
+                    "description": "Choose the top missing skills from your analysis, study them in short focused blocks, and convert each improvement into a visible project or quantified resume point.",
+                    "age": "Evergreen",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+            ],
+            "interview_tips": [
+                {
+                    "type": "tip",
+                    "title": f"Prepare concise stories for {role_title} interviews",
+                    "url": "",
+                    "description": "Practice 3 to 5 examples covering problem solving, teamwork, learning speed, and ownership. Keep each answer short, structured, and outcome-focused.",
+                    "age": "Practice now",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+                {
+                    "type": "tip",
+                    "title": "Revise fundamentals before advanced topics",
+                    "url": "",
+                    "description": "Interviewers usually notice weak fundamentals first. Revisit concepts, common mistakes, and applied examples before spending time on edge-case topics.",
+                    "age": "Practice now",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+            ],
+            "videos": [
+                {
+                    "type": "video",
+                    "title": f"Record a mock explanation for a key {role_title} concept",
+                    "url": "",
+                    "description": "Use your phone or laptop to explain one core concept in under 3 minutes. Replay it and tighten clarity, confidence, and structure.",
+                    "age": "Try today",
+                    "source": "TrackEneer",
+                    "thumbnail": "",
+                },
+            ],
+        },
+    }
+
+
 @app.post("/api/career/trends")
 async def get_trends(
     skills: List[str] = Form([]),
@@ -315,13 +647,13 @@ async def get_trends(
       1. Skill-specific news & articles
       2. Interview tips & career advice videos/blogs
     """
-    if not BRAVE_API_KEY:
-        raise HTTPException(status_code=503, detail="Brave Search API key is not configured. Add BRAVE_API_KEY to your .env file.")
-
     role_title = JOB_ROLE_REQUIREMENTS.get(role, {}).get("title", role.replace("_", " ").title())
+    top_skills = skills[:6] if skills else []
+
+    if not BRAVE_API_KEY:
+        return await _public_trends_search(role_title, top_skills)
 
     # Build search queries from skills
-    top_skills = skills[:6] if skills else []
     skill_query = " OR ".join(top_skills) if top_skills else role_title
     career_query = f"{role_title} latest trends technology 2025 2026"
     interview_query = f"{role_title} interview tips preparation guide"
@@ -349,6 +681,126 @@ async def get_trends(
             "videos": videos,
         },
     }
+
+
+# ─── Company Research & Alumni (Unified Career Center) ───
+
+@app.post("/api/career/companies/generate")
+async def generate_company_profile(
+    request: Request,
+    company_name: str = Form(...),
+    website: str = Form(None),
+    day: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+):
+    """Generate company profile using Gemini AI with caching."""
+    try:
+        user_email = resolve_user_email(request, email)
+        day_iso = normalize_day(day) if day else None
+        company_key = _company_key(company_name)
+
+        # Check cache first
+        cached = fetch_company(company_key, user_email, day_iso)
+        if cached and is_cache_valid(cached.get("generated_at", "")):
+            return {
+                "message": "Retrieved from cache",
+                "cached": True,
+                **cached
+            }
+        
+        # Generate new information
+        print(f"Generating information for {company_name}...")
+        company_info = generate_company_info(company_name, website)
+        
+        if not company_info["success"]:
+            error_msg = company_info.get("error", "Failed to generate information")
+            print(f"ERROR: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+        # Generate score
+        print(f"Generating score for {company_name}...")
+        score_info = generate_company_score(company_name, company_info)
+        company_info["score_info"] = score_info
+        
+        # Store in cache
+        store_company(company_key, company_info, user_email, day_iso)
+
+        return {
+            "message": "Information generated successfully",
+            "cached": False,
+            "ownerEmail": user_email,
+            "dayDate": day_iso,
+            **company_info
+        }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"EXCEPTION in generate_company_profile: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/career/companies/{company_name}")
+def get_company_profile(
+    company_name: str,
+    request: Request,
+    day: Optional[str] = None,
+    email: Optional[str] = None,
+):
+    """Get cached company profile."""
+    company_key = _company_key(company_name)
+    user_email = resolve_user_email(request, email)
+    day_iso = normalize_day(day) if day else None
+    company_info = fetch_company(company_key, user_email, day_iso)
+
+    if not company_info:
+        raise HTTPException(status_code=404, detail="Company not found. Please generate information first.")
+
+    return {
+        "cached": True,
+        "cache_valid": is_cache_valid(company_info.get("generated_at", "")),
+        **company_info
+    }
+
+
+@app.get("/api/career/companies")
+def list_cached_companies(request: Request, day: Optional[str] = None, email: Optional[str] = None):
+    """List all cached companies for the user."""
+    user_email = resolve_user_email(request, email)
+    day_iso = normalize_day(day) if day else None
+    
+    companies_data = list_companies(user_email, day_iso)
+    
+    return {"companies": companies_data, "total": len(companies_data)}
+
+
+@app.delete("/api/career/companies/{company_name}")
+def delete_cached_company(
+    company_name: str,
+    request: Request,
+    day: Optional[str] = None,
+    email: Optional[str] = None,
+):
+    """Delete a cached company profile."""
+    company_key = _company_key(company_name)
+    user_email = resolve_user_email(request, email)
+    day_iso = normalize_day(day) if day else None
+    
+    deleted = delete_company(company_key, user_email, day_iso)
+    
+    if deleted:
+        return {"message": "Company cache deleted successfully"}
+
+    raise HTTPException(status_code=404, detail="Company not found")
+
+
+@app.get("/api/career/alumni")
+def get_alumni_list():
+    """Get alumni placement data."""
+    alumni = get_alumni_data()
+    return {"alumni": alumni}
 
 
 if __name__ == "__main__":

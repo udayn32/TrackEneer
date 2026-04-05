@@ -69,14 +69,12 @@ try:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
 except ImportError:
     HAS_TESSERACT = False
-    print("Info: pytesseract not installed. OCR fallback disabled.")
 
 try:
     from pdf2image import convert_from_path
     HAS_PDF2IMAGE = True
 except ImportError:
     HAS_PDF2IMAGE = False
-    print("Info: pdf2image not installed. OCR fallback disabled.")
 
 # OpenCV for image preprocessing
 try:
@@ -87,17 +85,17 @@ except ImportError:
     HAS_OPENCV = False
     print("Info: opencv not installed. Image preprocessing disabled.")
 
-# Google Gemini AI
+from ai_client import build_text_model
+
+# Shared text model (GitHub Models preferred when configured)
 try:
-    import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-    HAS_GEMINI = bool(GEMINI_API_KEY)
-    print("✅ Gemini AI configured" if HAS_GEMINI else "⚠ Gemini AI skipped: GEMINI_API_KEY not set")
-except ImportError:
+    _gemini_model = build_text_model()
+    HAS_GEMINI = _gemini_model is not None
+    print("AI text model configured" if HAS_GEMINI else "AI text model skipped: no provider key set")
+except Exception:
     HAS_GEMINI = False
-    print("Info: google-generativeai not installed")
+    _gemini_model = None
+    print("Info: AI text model unavailable")
 
 # Groq AI (Fast, generous free tier - 14,400 requests/day)
 try:
@@ -1534,7 +1532,7 @@ class LocalNLPExtractor:
         """Extract syllabus using Google Gemini AI."""
         print("🔍 Using Gemini AI for syllabus extraction...")
         
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = _gemini_model
         
         prompt = f"""Analyze this university syllabus text (specifically focusing on Mumbai University structure) and extract structured course information.
 Return a JSON array with courses. Each course should have:
@@ -1920,7 +1918,7 @@ Return ONLY a valid JSON array of courses. No markdown, no explanation."""
     def _extract_exams_with_gemini(self, text: str) -> List[Dict]:
         """Extract exam timetable using Gemini AI."""
         print("🔍 Using Gemini AI for exam timetable...")
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = _gemini_model
         prompt = f"""Extract exam timetable from this text.
         Return JSON array where each object has:
         - subject: exam subject name
@@ -1983,7 +1981,7 @@ Return ONLY a valid JSON array of courses. No markdown, no explanation."""
     def _extract_calendar_with_gemini(self, text: str) -> List[Dict]:
         """Extract academic calendar using Gemini AI."""
         print("🔍 Using Gemini AI for calendar...")
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = _gemini_model
         prompt = f"""Extract academic events from this text.
         Return JSON array where each object has:
         - name: event name
@@ -3372,6 +3370,11 @@ class ExamTimetableParser:
             text = PDFTextExtractor.extract_text(file_path)
         
         if not text or len(text) < 100:
+            print("🖼️ Trying Gemini image-based OCR fallback for scanned timetable...")
+            exams = self._extract_exams_from_scanned_pdf_with_gemini(file_path)
+            if exams:
+                print(f"✅ Gemini image OCR extracted {len(exams)} exams")
+                return self._deduplicate_exams(exams)
             print("❌ Failed to extract text from PDF")
             return []
         
@@ -3422,6 +3425,116 @@ class ExamTimetableParser:
         exams = self._parse_sections(text)
         print(f"  → Section parsing found {len(exams)} exams")
         return self._deduplicate_exams(exams)
+
+    def _get_google_vision_model(self):
+        """Build a Google Gemini model directly for multimodal OCR fallback."""
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return None
+
+        try:
+            import google.generativeai as genai
+        except Exception as e:
+            print(f"⚠️ Gemini vision client unavailable: {e}")
+            return None
+
+        try:
+            genai.configure(api_key=api_key)
+            model_name = os.getenv("GOOGLE_GENAI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+            return genai.GenerativeModel(model_name)
+        except Exception as e:
+            print(f"⚠️ Failed to initialize Gemini vision model: {e}")
+            return None
+
+    def _extract_exams_from_scanned_pdf_with_gemini(self, file_path: str) -> List[ExamSchedule]:
+        """Extract exam timetable directly from rendered page images using Gemini."""
+        model = self._get_google_vision_model()
+        if not model:
+            return []
+
+        try:
+            page_images = self._render_pdf_pages_for_vision(file_path)
+            if not page_images:
+                return []
+
+            prompt = """You are reading pages from a university exam timetable PDF.
+Extract every exam shown across all provided pages.
+
+Return ONLY a valid JSON array. Each item must have this exact shape:
+[
+  {
+    "subject": "Digital Signal Processing",
+    "date": "2025-11-18",
+    "start_time": "10:30",
+    "end_time": "13:30",
+    "venue": null,
+    "exam_type": "final"
+  }
+]
+
+Rules:
+- Include every visible exam row from all pages.
+- Convert dates to ISO format YYYY-MM-DD.
+- Use 24-hour HH:MM time when visible, otherwise null.
+- Subject must be the human-readable paper name only, not the subject code.
+- Ignore headers, seat number notes, legends, and administrative instructions.
+- If a field is not visible, use null.
+- Return JSON only with no markdown fences or explanation."""
+
+            response = model.generate_content([prompt, *page_images])
+            content = (getattr(response, "text", "") or "").strip()
+            if not content:
+                return []
+
+            content = re.sub(r"^```json\s*", "", content, flags=re.MULTILINE)
+            content = re.sub(r"^```\s*|\s*```$", "", content, flags=re.MULTILINE)
+            ai_results = json.loads(content.strip())
+            if not isinstance(ai_results, list):
+                return []
+
+            return self._convert_ai_results_to_exams(ai_results)
+        except Exception as e:
+            print(f"⚠️ Gemini image OCR fallback failed: {e}")
+            return []
+
+    def _render_pdf_pages_for_vision(self, file_path: str, max_pages: int = 4) -> List[Any]:
+        """Render PDF pages to PIL images using whatever local backend is available."""
+        from io import BytesIO
+
+        # Prefer PyMuPDF when available.
+        try:
+            import fitz
+
+            page_images = []
+            with fitz.open(file_path) as doc:
+                for page_index in range(min(max_pages, len(doc))):
+                    page = doc[page_index]
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+                    image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+                    page_images.append(image)
+            if page_images:
+                return page_images
+        except Exception as e:
+            print(f"⚠️ PyMuPDF rendering unavailable: {e}")
+
+        # Fall back to pypdfium2, which works without external poppler binaries.
+        try:
+            import pypdfium2 as pdfium
+
+            page_images = []
+            pdf = pdfium.PdfDocument(file_path)
+            for page_index in range(min(max_pages, len(pdf))):
+                page = pdf[page_index]
+                bitmap = page.render(scale=2.5)
+                pil_image = bitmap.to_pil().convert("RGB")
+                page_images.append(pil_image)
+            if page_images:
+                return page_images
+        except Exception as e:
+            print(f"⚠️ pypdfium2 rendering unavailable: {e}")
+
+        print("⚠️ Image OCR prerequisites unavailable: no supported PDF renderer found")
+        return []
     
     def _extract_exams_with_groq(self, text: str) -> List[ExamSchedule]:
         """Extract exam schedule using Groq AI with structured output"""

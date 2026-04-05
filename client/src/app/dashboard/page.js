@@ -4,6 +4,7 @@ import { useSession } from "next-auth/react";
 import { useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, "") || "http://localhost:5000";
+const DASHBOARD_REFRESH_MS = 30000;
 
 // Fallback quotes for when API is unavailable
 const FALLBACK_QUOTES = [
@@ -18,6 +19,26 @@ const FALLBACK_QUOTES = [
   { content: "Discipline is the bridge between goals and accomplishment.", author: "Jim Rohn" },
   { content: "Everything you've ever wanted is on the other side of fear.", author: "George Addair" },
 ];
+
+const PRIORITY_LABELS = {
+  high: "high",
+  medium: "medium",
+  low: "low",
+};
+
+function cleanTaskTitle(title) {
+  if (!title) return "Untitled task";
+  return String(title).replace(/\s+/g, " ").replace(/^study:\s*/i, "").trim();
+}
+
+function cleanFileTitle(title) {
+  if (!title) return "Untitled file";
+  let value = String(title).trim();
+  value = value.replace(/^[a-f0-9]{8}-[a-f0-9-]{20,}_/i, "");
+  value = value.replace(/^demo\s+/i, "");
+  value = value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return value || "Untitled file";
+}
 
 // Header Component
 const Header = () => {
@@ -98,13 +119,16 @@ const Header = () => {
 
 // Next Task Component
 const NextTask = () => {
+  const { data: session } = useSession();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
+  const email = session?.user?.email || "";
 
   useEffect(() => {
     const fetchNextTasks = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/upcoming-deadlines`);
+        const query = email ? `?email=${encodeURIComponent(email)}` : "";
+        const response = await fetch(`${API_BASE}/api/upcoming-deadlines${query}`);
         if (!response.ok) throw new Error("Failed to fetch tasks");
         const data = await response.json();
 
@@ -120,7 +144,9 @@ const NextTask = () => {
     };
 
     fetchNextTasks();
-  }, []);
+    const intervalId = setInterval(fetchNextTasks, DASHBOARD_REFRESH_MS);
+    return () => clearInterval(intervalId);
+  }, [email]);
 
   const formatDueDate = (dueDate) => {
     if (!dueDate) return "";
@@ -157,20 +183,22 @@ const NextTask = () => {
           <p className="text-lg text-slate-400 text-center py-8">Loading...</p>
         ) : tasks.length > 0 ? (
           tasks.map((task, index) => (
-            <div key={index} className="bg-gradient-to-r from-slate-800/80 to-slate-700/80 rounded-lg p-4 shadow-lg border border-cyan-500/20 hover:border-cyan-400/40 hover:shadow-cyan-500/20 transition-all duration-300">
+            <div key={index} className="bg-gradient-to-r from-slate-800/80 to-slate-700/80 rounded-xl p-4 shadow-lg border border-cyan-500/20 hover:border-cyan-400/35 hover:shadow-cyan-500/15 transition-all duration-300">
               <div className="flex items-start justify-between gap-3">
-                <div className="flex-1">
-                  <h3 className="text-lg font-bold text-white">{task.title || 'Untitled Task'}</h3>
-                  <p className="text-sm text-slate-400 mt-1">
-                    {task.dueDate && `📅 Due: ${formatDueDate(task.dueDate)}`}
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-lg font-bold leading-snug text-white break-words">
+                    {cleanTaskTitle(task.title)}
+                  </h3>
+                  <p className="text-sm text-slate-400 mt-2">
+                    {task.dueDate && `Due: ${formatDueDate(task.dueDate)}`}
                   </p>
                 </div>
                 {task.priority && (
-                  <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${task.priority === 'High' ? 'bg-gradient-to-r from-red-500 to-pink-500 text-white' :
+                  <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap capitalize shrink-0 ${task.priority === 'High' ? 'bg-gradient-to-r from-red-500 to-pink-500 text-white' :
                       task.priority === 'Medium' ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white' :
                         'bg-gradient-to-r from-green-500 to-emerald-500 text-white'
                     }`}>
-                    {task.priority}
+                    {PRIORITY_LABELS[String(task.priority || '').toLowerCase()] || String(task.priority).toLowerCase()}
                   </span>
                 )}
               </div>
@@ -184,7 +212,7 @@ const NextTask = () => {
         )}
       </div>
 
-      <a href="/schedule" className="block w-full bg-gradient-to-r from-cyan-400 to-blue-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 hover:scale-105 text-center font-semibold">
+      <a href="/schedule" className="block w-full bg-gradient-to-r from-cyan-400 to-blue-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 text-center font-semibold">
         Go to Schedule →
       </a>
     </div>
@@ -193,6 +221,56 @@ const NextTask = () => {
 
 // Recent Files Component
 const RecentFiles = () => {
+  const { data: session } = useSession();
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const email = session?.user?.email || "";
+
+  useEffect(() => {
+    const fetchRecentFiles = async () => {
+      try {
+        const emailQuery = email ? `&email=${encodeURIComponent(email)}` : "";
+        const [notesResponse, docsResponse] = await Promise.all([
+          fetch(`${API_BASE}/api/notes/recent?limit=3${emailQuery}`),
+          fetch(`${API_BASE}/api/knowledge-graph/documents?email=${encodeURIComponent(email)}`),
+        ]);
+
+        const notesData = notesResponse.ok ? await notesResponse.json() : { notes: [] };
+        const docsData = docsResponse.ok ? await docsResponse.json() : { documents: [] };
+
+        const noteItems = Array.isArray(notesData.notes)
+          ? notesData.notes.map((note) => ({
+              id: note.id || note.filename || note.title,
+              title: cleanFileTitle(note.title || note.filename || "Untitled note"),
+              icon: "📝",
+              meta: note.fileType || "Note",
+            }))
+          : [];
+
+        const docItems = Array.isArray(docsData.documents)
+          ? docsData.documents.slice(0, 3).map((doc) => ({
+              id: doc.document,
+              title: cleanFileTitle(doc.document || "Knowledge graph document"),
+              icon: "🧠",
+              meta: `${doc.concept_count || 0} concepts`,
+            }))
+          : [];
+
+        const merged = [...noteItems, ...docItems].slice(0, 3);
+        setFiles(merged);
+      } catch (err) {
+        console.error("Error fetching recent files:", err);
+        setFiles([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchRecentFiles();
+    const intervalId = setInterval(fetchRecentFiles, DASHBOARD_REFRESH_MS);
+    return () => clearInterval(intervalId);
+  }, [email]);
+
   return (
     <div className='bg-gradient-to-br from-slate-800 via-slate-700 to-slate-800 p-6 rounded-xl shadow-2xl border border-purple-500/20 w-full'>
       <h2 className="text-2xl font-bold mb-4 text-white flex items-center">
@@ -201,23 +279,29 @@ const RecentFiles = () => {
       </h2>
 
       <div className="bg-slate-900/50 backdrop-blur-sm rounded-lg p-4 mb-6 border border-purple-500/10">
-        <ul className='space-y-3'>
-          <li className='bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 rounded-lg text-white font-medium border border-purple-500/20 hover:border-purple-400/40 hover:shadow-lg hover:shadow-purple-500/20 transition-all duration-300 flex items-center'>
-            <span className="mr-3 text-xl">📝</span>
-            DSA Notes
-          </li>
-          <li className='bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 rounded-lg text-white font-medium border border-purple-500/20 hover:border-purple-400/40 hover:shadow-lg hover:shadow-purple-500/20 transition-all duration-300 flex items-center'>
-            <span className="mr-3 text-xl">📚</span>
-            Lecture 1 - CN
-          </li>
-          <li className='bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 rounded-lg text-white font-medium border border-purple-500/20 hover:border-purple-400/40 hover:shadow-lg hover:shadow-purple-500/20 transition-all duration-300 flex items-center'>
-            <span className="mr-3 text-xl">📄</span>
-            Data mining QB
-          </li>
-        </ul>
+        {loading ? (
+          <p className="text-lg text-slate-400 text-center py-8">Loading...</p>
+        ) : files.length > 0 ? (
+          <ul className='space-y-3'>
+            {files.map((file) => (
+              <li key={file.id} className='bg-gradient-to-r from-slate-800/80 to-slate-700/80 p-4 rounded-xl text-white font-medium border border-purple-500/20 hover:border-purple-400/30 transition-all duration-300 flex items-center justify-between gap-3'>
+                <div className="flex items-center min-w-0 flex-1">
+                  <span className="mr-3 text-xl shrink-0">{file.icon}</span>
+                  <span className="truncate pr-3">{file.title}</span>
+                </div>
+                <span className="text-xs text-slate-400 whitespace-nowrap shrink-0">{file.meta}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-center py-8">
+            <p className="text-xl font-bold text-white">No Recent Files</p>
+            <p className="text-sm text-slate-400 mt-2">Upload notes in Study to see them here</p>
+          </div>
+        )}
       </div>
 
-      <a href="/study" className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 hover:scale-105 font-semibold">
+      <a href="/study" className="block w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 text-center font-semibold">
         Go to Study →
       </a>
     </div>
@@ -244,31 +328,7 @@ const QuickAccessModules = () => {
       hoverShadow: 'hover:shadow-purple-500/30'
     },
     {
-      name: 'Placement',
-      icon: '🏢',
-      description: 'Research companies and prepare',
-      link: '/placement',
-      gradient: 'from-blue-500 to-indigo-600',
-      hoverShadow: 'hover:shadow-blue-500/30'
-    },
-    {
       name: 'Insights',
-      icon: '💡',
-      description: 'Get personalized guidance',
-      link: '/insights',
-      gradient: 'from-emerald-500 to-teal-500',
-      hoverShadow: 'hover:shadow-emerald-500/30'
-    },
-    {
-      name: 'Knowledge Graph',
-      icon: '🧠',
-      description: 'Visualize concept maps & prerequisites',
-      link: '/knowledge-graph',
-      gradient: 'from-violet-500 to-fuchsia-500',
-      hoverShadow: 'hover:shadow-violet-500/30'
-    },
-    {
-      name: 'AI Mentor',
       icon: '🎓',
       description: 'Socratic tutoring powered by your notes',
       link: '/mentor',
@@ -276,15 +336,7 @@ const QuickAccessModules = () => {
       hoverShadow: 'hover:shadow-amber-500/30'
     },
     {
-      name: 'Mastery Tracker',
-      icon: '📊',
-      description: 'Track learning progress & take quizzes',
-      link: '/knowledge-tracing',
-      gradient: 'from-rose-500 to-red-500',
-      hoverShadow: 'hover:shadow-rose-500/30'
-    },
-    {
-      name: 'Career Readiness',
+      name: 'Placement',
       icon: '🚀',
       description: 'Skill mapping & placement prediction',
       link: '/career',

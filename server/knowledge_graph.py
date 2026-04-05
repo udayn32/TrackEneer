@@ -54,12 +54,11 @@ except Exception:
 
 # ---------- Gemini ----------
 try:
-    import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not set")
-    genai.configure(api_key=GEMINI_API_KEY)
-    _gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+    from ai_client import build_text_model
+
+    _gemini_model = build_text_model()
+    if not _gemini_model:
+        raise ValueError("No AI model configured")
     HAS_GEMINI = True
 except Exception:
     HAS_GEMINI = False
@@ -1615,6 +1614,76 @@ class KnowledgeGraphStore:
                 })
 
             return {"nodes": nodes, "edges": edges, "node_count": len(nodes), "edge_count": len(edges)}
+
+    def search_concepts(self, user_email: str, query: str, limit: int = 20) -> List[dict]:
+        """Find concept candidates without loading the full graph."""
+        tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9_+#.-]+", query or "") if len(t) > 2][:8]
+        query_lower = (query or "").strip().lower()
+        if not tokens and not query_lower:
+            return []
+
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:User {email: $email})-[:HAS_CONCEPT]->(c:Concept)
+                WHERE
+                    ($query = '' OR toLower(c.name) CONTAINS $query OR toLower(coalesce(c.description, '')) CONTAINS $query)
+                    OR ANY(token IN $tokens WHERE toLower(c.name) CONTAINS token OR toLower(coalesce(c.description, '')) CONTAINS token)
+                RETURN c
+                ORDER BY coalesce(c.mastery, 0) ASC, c.createdAt DESC
+                LIMIT $limit
+                """,
+                email=user_email,
+                query=query_lower,
+                tokens=tokens,
+                limit=limit,
+            )
+            concepts = []
+            for record in result:
+                c = record["c"]
+                concepts.append({
+                    "id": c.get("id", ""),
+                    "name": c.get("name", ""),
+                    "description": c.get("description", ""),
+                    "category": c.get("category", ""),
+                    "difficulty": c.get("difficulty", ""),
+                    "bloom_level": c.get("bloom_level", ""),
+                    "mastery": c.get("mastery", 0.0),
+                    "source_document": c.get("source_document", ""),
+                    "layer": c.get("layer", 2),
+                    "weight": c.get("weight", 0.0),
+                })
+            return concepts
+
+    def get_recent_concepts(self, user_email: str, limit: int = 120) -> List[dict]:
+        """Return a bounded concept set for fast mentor ranking."""
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (u:User {email: $email})-[:HAS_CONCEPT]->(c:Concept)
+                RETURN c
+                ORDER BY c.createdAt DESC
+                LIMIT $limit
+                """,
+                email=user_email,
+                limit=limit,
+            )
+            concepts = []
+            for record in result:
+                c = record["c"]
+                concepts.append({
+                    "id": c.get("id", ""),
+                    "name": c.get("name", ""),
+                    "description": c.get("description", ""),
+                    "category": c.get("category", ""),
+                    "difficulty": c.get("difficulty", ""),
+                    "bloom_level": c.get("bloom_level", ""),
+                    "mastery": c.get("mastery", 0.0),
+                    "source_document": c.get("source_document", ""),
+                    "layer": c.get("layer", 2),
+                    "weight": c.get("weight", 0.0),
+                })
+            return concepts
 
     def get_prerequisites(self, concept_name: str, user_email: str, depth: int = 5) -> List[dict]:
         """Traverse prerequisite chain backwards for a concept."""

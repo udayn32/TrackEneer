@@ -72,8 +72,8 @@ export default function LandingPage() {
             {[
                 { 
                   icon: "📊", 
-                  title: "Project Dashboard", 
-                  desc: "Organize your projects, assign tasks, and track your team's progress with AI-powered insights.",
+                  title: "Knowledge Graph", 
+                  desc: "Organize notes,understand and visualize concepts",
                   color: "from-cyan-500/20 to-blue-500/20",
                   borderColor: "hover:border-cyan-400"
                 },
@@ -87,7 +87,7 @@ export default function LandingPage() {
                 { 
                   icon: "🎯", 
                   title: "Placement Insights", 
-                  desc: "Explore company profiles, get alumni tips, and strategically target your dream job.",
+                  desc: "Explore company profiles,and strategically target your dream job.",
                   color: "from-orange-500/20 to-amber-500/20",
                   borderColor: "hover:border-orange-400"
                 },
@@ -111,7 +111,7 @@ export default function LandingPage() {
             {[
               { icon: "🔔", title: "Smart Notifications", desc: "Never miss a deadline with intelligent reminders" },
               { icon: "📈", title: "Progress Analytics", desc: "Track your growth with detailed performance metrics" },
-              { icon: "🤝", title: "Team Collaboration", desc: "Work seamlessly with your project teammates" },
+
               { icon: "🎓", title: "AI Recommendations", desc: "Get personalized task suggestions based on your goals" },
             ].map((feature, i) => (
               <div key={i} className="flex items-start gap-4 p-6 bg-slate-900/30 backdrop-blur-sm border border-slate-800 rounded-xl hover:border-cyan-500/50 transition-all duration-300 hover:scale-102">

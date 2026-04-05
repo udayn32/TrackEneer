@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
 
-const API = process.env.NEXT_PUBLIC_STUDY_API?.replace(/\/$/, '') || process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, '') || 'http://localhost:5002'
+const API = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, '') || 'http://localhost:5000'
 
 const DIFF_COLORS = { easy: '#10b981', medium: '#f59e0b', hard: '#ef4444' }
 const REL_COLORS = { PREREQUISITE_OF: '#f97316', PART_OF: '#8b5cf6', RELATED_TO: '#06b6d4', LEADS_TO: '#22c55e' }
@@ -604,12 +604,8 @@ function EduKGraph({ nodes: rawNodes, edges, onNodeClick }) {
     }, [rawNodes, edges, onNodeClick])
 
     return (
-        <div className="w-full h-[780px] relative rounded-3xl overflow-hidden shadow-inner">
-            {/* Subtle glow overlay for deep immersion */}
-            <div className="absolute inset-0 pointer-events-none rounded-3xl shadow-[inset_0_0_80px_rgba(0,0,0,0.8)] z-10"></div>
-            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3/4 h-32 bg-cyan-500/5 blur-[80px] pointer-events-none z-10"></div>
-            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1/2 h-32 bg-purple-500/5 blur-[60px] pointer-events-none z-10"></div>
-            <canvas ref={canvasRef} className="w-full h-full relative z-0" style={{ background: 'linear-gradient(180deg,#060b14 0%,#0f172a 50%,#060b14 100%)' }} />
+        <div className="w-full h-[780px] relative">
+            <canvas ref={canvasRef} className="w-full h-full rounded-xl" style={{ background: 'linear-gradient(180deg,#0a0f1e 0%,#0f172a 60%,#0a0f1e 100%)' }} />
         </div>
     )
 }
@@ -618,8 +614,14 @@ function EduKGraph({ nodes: rawNodes, edges, onNodeClick }) {
 /* ================================================================
    MAIN PAGE
 ================================================================ */
-export default function KnowledgeGraphPage() {
+export default function EduKGView({ subjectName }) {
     const { data: session } = useSession()
+    useEffect(() => {
+        if (subjectName) {
+            setSelectedDoc(subjectName)
+            fetchGraph(subjectName)
+        }
+    }, [subjectName, fetchGraph])
     const [graph, setGraph] = useState({ nodes: [], edges: [] })
     const [loading, setLoading] = useState(true)
     const [selected, setSelected] = useState(null)
@@ -698,31 +700,31 @@ export default function KnowledgeGraphPage() {
 
     const handleUpload = async () => {
         if (!uploadFile) return
-        const fileName = uploadFile.name
+        const subName = prompt("Enter Subject Name for this Note:") || "General"
+
         setUploading(true)
         setPreprocessLog(null)
         try {
+            // Create or get subject
+            const dfd = new FormData(); dfd.append('name', subName); dfd.append('email', email);
+            const rsub = await fetch(`${API}/api/subjects`, {method: 'POST', body: dfd})
+            const subData = await rsub.json()
+            const sid = subData.subject?.id || subData.id
+
+            // Upload note
             const fd = new FormData()
             fd.append('file', uploadFile)
+            fd.append('subject_id', sid)
             fd.append('email', email)
-            fd.append('strategy', 'llm')
-            const uploadRes = await fetch(`${API}/api/knowledge-graph/upload`, { method: 'POST', body: fd })
+            
+            // This triggers the process_file_background which processes it into the KG
+            const uploadRes = await fetch(`${API}/api/notes/upload`, { method: 'POST', body: fd })
             const uploadData = await uploadRes.json().catch(() => ({}))
-            if (uploadData.preprocessing_stats) setPreprocessLog(uploadData.preprocessing_stats)
-
-            // Upload now processes synchronously — refresh documents and graph immediately
-            const docsRes = await fetch(`${API}/api/knowledge-graph/documents?email=${encodeURIComponent(email)}`)
-            const docsData = await docsRes.json().catch(() => ({}))
-            const docs = docsData.documents || []
-            setDocuments(docs)
-            const found = docs.find(doc => doc.document === fileName)
-            if (found) {
-                setSelectedDoc(fileName)
-                fetchGraph(fileName)
-                setTab('graph')
-            } else {
-                fetchGraph()
-            }
+            
+            alert(`Uploaded note to subject ${subName}! The Knowledge Graph will start building in the background. Check back in a few moments.`);
+            
+            // Refresh subjects selection list (documents endpoint now returns subjects)
+            fetchDocuments()
         } catch (e) { console.error(e) }
         finally { setUploading(false); setUploadFile(null) }
     }
@@ -764,38 +766,15 @@ export default function KnowledgeGraphPage() {
     const filteredEdges = graph.edges.filter(e => filteredNodeNames.has(e.source) && filteredNodeNames.has(e.target))
 
     return (
-        <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-6 relative overflow-hidden">
-            {/* Animated background elements */}
-            <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute top-0 left-0 w-[500px] h-[500px] bg-gradient-to-br from-indigo-500/10 via-purple-500/5 to-transparent rounded-full blur-3xl animate-pulse" />
-                <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-gradient-to-tl from-cyan-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl animate-pulse animation-delay-2000" />
-                <div className="absolute top-1/2 right-1/3 w-[400px] h-[400px] bg-gradient-to-tl from-purple-500/8 via-pink-500/5 to-transparent rounded-full blur-3xl animate-pulse animation-delay-4000" />
-            </div>
-            <div className="relative z-10 max-w-7xl mx-auto">
-                {/* Header */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8 animate-fade-in p-6 bg-slate-900/40 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-xl">
-                    <div>
-                        <h1 className="text-4xl md:text-5xl font-extrabold text-white flex items-center gap-4 mb-2 tracking-tight">
-                            <span className="text-4xl md:text-5xl bg-slate-800/80 p-3 rounded-2xl border border-slate-700/50 shadow-inner">🧠</span>
-                            <span className="bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 bg-clip-text text-transparent drop-shadow-sm">Knowledge Graph</span>
-                        </h1>
-                        <p className="text-slate-400 text-base md:text-lg max-w-2xl leading-relaxed">Interactive IEEE EduKG concept map — drag nodes, scroll to zoom, pan the view. IEEE-compliant ontology with Bloom's taxonomy integration.</p>
-                    </div>
-                    <div className="flex gap-3">
-                        <a href="/study" className="px-5 py-3 bg-slate-800/80 hover:bg-slate-700 text-slate-200 rounded-xl hover:shadow-lg transition-all duration-300 flex items-center gap-2 font-medium border border-slate-600/50 group">
-                            <span className="group-hover:-translate-x-1 transition-transform">←</span> Study Hub
-                        </a>
-                        <button onClick={handleEnrich} className="px-5 py-3 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white rounded-xl hover:shadow-[0_0_20px_rgba(139,92,246,0.4)] transition-all duration-300 flex items-center gap-2 font-semibold">
-                            <span>✨</span> Enrich with AI
-                        </button>
-                    </div>
-                </div>
+        <div className="w-full relative">
+            <div className="relative z-10 w-full mb-12">
+                
 
                 {/* Tabs */}
-                <div className="flex gap-2 mb-8 bg-slate-900/50 p-1.5 rounded-xl border border-slate-700/50 inline-flex backdrop-blur-sm animate-fade-in animation-delay-100">
-                    {['graph', 'concepts', 'build', 'analysis'].map((t, idx) => (
+                <div className="flex gap-2 mb-6">
+                    {['graph', 'concepts', 'build', 'analysis'].map(t => (
                         <button key={t} onClick={() => { setTab(t); if (t === 'analysis') fetchWeaknesses() }}
-                            className={`px-6 py-2.5 rounded-lg font-semibold transition-all duration-300 text-sm flex items-center gap-2 ${tab === t ? 'bg-gradient-to-r from-cyan-500 to-blue-500 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/80'}`}>
+                            className={`px-4 py-2 rounded-lg font-medium transition ${tab === t ? 'bg-gradient-to-r from-cyan-500 to-blue-500 text-white shadow-lg shadow-cyan-500/25' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
                             {t === 'graph' ? '🔗 Graph' : t === 'concepts' ? '📚 Concepts' : t === 'build' ? '🏗️ Build' : '🔍 Analysis'}
                         </button>
                     ))}
@@ -809,45 +788,35 @@ export default function KnowledgeGraphPage() {
                     <>
                         {/* ── Graph Tab ── */}
                         {tab === 'graph' && (
-                            <div className="bg-slate-900/40 backdrop-blur-xl rounded-3xl border border-slate-700/50 p-6 md:p-8 shadow-2xl transition-all duration-300 animate-fade-in animation-delay-200">
-                                {/* Document Selector */}
+                            <div className="bg-slate-800/60 backdrop-blur-sm rounded-2xl border border-slate-700/50 p-4">
+                                {/* Subject Selector */}
                                 {documents.length > 0 && (
-                                    <div className="flex flex-col sm:flex-row sm:items-center gap-4 mb-6 p-5 bg-slate-800/60 rounded-2xl border border-slate-600/50 shadow-inner">
-                                        <span className="text-slate-300 text-sm font-bold uppercase tracking-wider flex items-center gap-2"><span className="text-xl">📄</span> Filter by Document</span>
-                                        <div className="relative flex-1">
-                                            <select value={selectedDoc} onChange={e => handleDocChange(e.target.value)}
-                                                className="appearance-none w-full bg-slate-900/80 border border-slate-600 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 text-slate-200 text-sm rounded-xl px-4 py-3 pr-10 transition-all font-medium shadow-sm">
-                                                <option value="all">All Documents ({graph.nodes.length} concepts total)</option>
-                                                {documents.map(d => (
-                                                    <option key={d.document} value={d.document}>{d.document} ({d.concept_count} concepts)</option>
-                                                ))}
-                                            </select>
-                                            <span className="absolute right-4 top-3.5 pointer-events-none text-slate-400 text-xs">▼</span>
-                                        </div>
+                                    <div className="flex items-center gap-2 mb-3 p-3 bg-slate-900/60 rounded-xl border border-slate-700/40">
+                                        <span className="text-slate-400 text-sm">📚 Subject:</span>
+                                        <select value={selectedDoc} onChange={e => handleDocChange(e.target.value)}
+                                            className="flex-1 bg-slate-700 border border-slate-600 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-cyan-500">
+                                            <option value="all">All Subjects ({graph.nodes.length} concepts)</option>
+                                            {documents.map(d => (
+                                                <option key={d.document} value={d.document}>{d.document} ({d.concept_count} concepts)</option>
+                                            ))}
+                                        </select>
                                     </div>
                                 )}
                                 {/* Toolbar */}
-                                <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4 p-5 bg-slate-800/40 rounded-2xl border border-slate-700/50 shadow-sm backdrop-blur-md">
-                                    <div className="flex flex-wrap items-center gap-4">
-                                        <div className="flex items-center gap-3 bg-slate-900/60 px-4 py-2 rounded-xl border border-slate-700/50 shadow-inner">
-                                            <p className="text-white text-sm font-bold flex items-baseline gap-1.5"><span className="text-cyan-400 text-lg">{filteredNodes.length}</span> <span className="text-slate-400 font-medium font-medium">concepts</span></p>
-                                            <div className="w-px h-5 bg-slate-700"></div>
-                                            <p className="text-white text-sm font-bold flex items-baseline gap-1.5"><span className="text-purple-400 text-lg">{filteredEdges.length}</span> <span className="text-slate-400 font-medium font-medium">relations</span></p>
-                                        </div>
+                                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                                    <div className="flex items-center gap-3">
+                                        <p className="text-slate-300 text-sm font-medium">{filteredNodes.length} concepts · {filteredEdges.length} relations</p>
                                         {/* Category filter */}
-                                        <div className="relative">
-                                            <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
-                                                className="appearance-none bg-slate-900/80 border border-slate-600 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 text-slate-200 text-sm rounded-xl px-4 py-2.5 pr-10 transition-all font-medium shadow-sm min-w-[160px]">
-                                                <option value="all">All Categories</option>
-                                                {categories.map(c => <option key={c} value={c} className="capitalize">{c}</option>)}
-                                            </select>
-                                            <span className="absolute right-3.5 top-3.5 pointer-events-none text-slate-400 text-xs">▼</span>
-                                        </div>
+                                        <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
+                                            className="bg-slate-700 border border-slate-600 text-slate-200 text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-cyan-500">
+                                            <option value="all">All categories</option>
+                                            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                                        </select>
                                     </div>
-                                    <div className="flex gap-4 text-xs font-medium text-slate-300 flex-wrap bg-slate-900/40 p-3 rounded-xl border border-slate-700/50">
+                                    <div className="flex gap-4 text-xs text-slate-400">
                                         {Object.entries(REL_COLORS).map(([k, c]) => (
-                                            <span key={k} className="flex items-center gap-2 hover:text-white transition-colors cursor-default">
-                                                <span className="w-5 h-1.5 rounded-full transition-all" style={{ background: c, boxShadow: `0 0 10px ${c}66` }} />
+                                            <span key={k} className="flex items-center gap-1.5">
+                                                <span className="w-4 h-1 rounded-full" style={{ background: c }} />
                                                 {k.replace(/_/g, ' ')}
                                             </span>
                                         ))}
@@ -855,31 +824,23 @@ export default function KnowledgeGraphPage() {
                                 </div>
 
                                 {/* Category color legend */}
-                                <div className="flex items-center gap-4 mb-6 flex-wrap text-sm text-slate-300 p-4 bg-slate-800/40 rounded-2xl border border-slate-700/50 backdrop-blur-md">
-                                    <span className="text-slate-400 font-bold uppercase tracking-wider text-xs">Node Types</span>
-                                    <div className="h-4 w-px bg-slate-700"></div>
-                                    <div className="flex gap-4 flex-wrap">
-                                        {Object.entries(CAT_COLORS).filter(([k]) => k !== 'default').map(([k, c]) => (
-                                            <span key={k} className="flex items-center gap-2 hover:text-white transition-colors cursor-default capitalize text-xs font-semibold bg-slate-900/50 px-2.5 py-1 rounded-lg border border-slate-700/50">
-                                                <span className="w-2.5 h-2.5 rounded-full transition-all" style={{ background: c, boxShadow: `0 0 8px ${c}88` }} />
-                                                {k}
-                                            </span>
-                                        ))}
-                                    </div>
+                                <div className="flex gap-3 mb-3 flex-wrap text-xs text-slate-400">
+                                    <span className="text-slate-500">Nodes:</span>
+                                    {Object.entries(CAT_COLORS).filter(([k]) => k !== 'default').map(([k, c]) => (
+                                        <span key={k} className="flex items-center gap-1">
+                                            <span className="w-2.5 h-2.5 rounded-full" style={{ background: c }} />
+                                            {k}
+                                        </span>
+                                    ))}
                                 </div>
 
                                 {filteredNodes.length > 0 ? (
-                                    <div className="bg-slate-950 rounded-3xl border border-slate-700/60 overflow-hidden shadow-[0_0_40px_-15px_rgba(0,0,0,0.5)] relative group">
-                                        <div className="absolute inset-0 pointer-events-none rounded-3xl shadow-[inset_0_0_50px_rgba(0,0,0,0.5)] z-10"></div>
-                                        <EduKGraph nodes={filteredNodes} edges={filteredEdges} onNodeClick={handleNodeClick} />
-                                    </div>
+                                    <EduKGraph nodes={filteredNodes} edges={filteredEdges} onNodeClick={handleNodeClick} />
                                 ) : (
-                                    <div className="h-[600px] flex flex-col items-center justify-center text-slate-400 bg-slate-900/30 rounded-3xl border-2 border-dashed border-slate-700">
-                                        <div className="w-24 h-24 mb-6 bg-slate-800 rounded-full flex items-center justify-center shadow-lg border border-slate-700">
-                                            <span className="text-5xl opacity-80">🕸️</span>
-                                        </div>
-                                        <h3 className="text-2xl font-bold text-white mb-2">Knowledge Graph is Empty</h3>
-                                        <p className="text-lg text-slate-400 max-w-md text-center">Navigate to the <span className="text-cyan-400 font-medium">Build</span> tab to upload a syllabus or paste text to extract concepts.</p>
+                                    <div className="h-96 flex flex-col items-center justify-center text-slate-400">
+                                        <span className="text-6xl mb-4">📊</span>
+                                        <p className="text-lg font-medium">No concepts yet</p>
+                                        <p className="text-sm mt-1">Upload a syllabus or paste text to build your Knowledge Graph</p>
                                     </div>
                                 )}
                             </div>
@@ -897,61 +858,42 @@ export default function KnowledgeGraphPage() {
                                     return 0
                                 })
                             return (
-                            <div className="animate-fade-in animation-delay-200">
+                            <div>
                                 {/* Search + Sort toolbar */}
-                                <div className="flex items-center gap-4 mb-6 flex-wrap bg-slate-900/40 p-4 rounded-xl border border-slate-700/50 backdrop-blur-md">
-                                    <div className="relative flex-1 min-w-[240px]">
+                                <div className="flex items-center gap-3 mb-4 flex-wrap">
+                                    <div className="relative flex-1 min-w-[200px]">
                                         <input type="text" value={conceptSearch} onChange={e => setConceptSearch(e.target.value)}
-                                            placeholder="Search concepts by name..." className="w-full bg-slate-800/80 border border-slate-600/60 text-slate-200 text-sm rounded-xl px-4 py-3 pl-11 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 transition-all placeholder-slate-500 shadow-inner" />
-                                        <span className="absolute left-4 top-3.5 text-slate-400">🔍</span>
+                                            placeholder="Search concepts..." className="w-full bg-slate-800/60 border border-slate-700/50 text-slate-200 text-sm rounded-lg px-4 py-2 pl-9 focus:outline-none focus:border-cyan-500 placeholder-slate-500" />
+                                        <span className="absolute left-3 top-2.5 text-slate-500">🔍</span>
                                     </div>
-                                    <div className="relative">
-                                        <select value={conceptSort} onChange={e => setConceptSort(e.target.value)}
-                                            className="appearance-none bg-slate-800/80 border border-slate-600/60 text-slate-200 text-sm rounded-xl px-4 py-3 pr-10 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 transition-all font-medium min-w-[160px] shadow-inner">
-                                            <option value="layer">Sort by Layer (Ontology)</option>
-                                            <option value="weight">Sort by SIF Weight</option>
-                                            <option value="name">Sort by Name (A-Z)</option>
-                                            <option value="difficulty">Sort by Difficulty</option>
-                                        </select>
-                                        <span className="absolute right-4 top-3.5 pointer-events-none text-slate-400 text-xs">▼</span>
-                                    </div>
-                                    <div className="px-4 py-2 bg-slate-800/50 rounded-lg border border-slate-700/50">
-                                        <span className="text-cyan-400 font-bold text-lg">{sorted.length}</span> <span className="text-slate-400 text-sm">concepts</span>
-                                    </div>
+                                    <select value={conceptSort} onChange={e => setConceptSort(e.target.value)}
+                                        className="bg-slate-800/60 border border-slate-700/50 text-slate-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500">
+                                        <option value="layer">Sort by Layer</option>
+                                        <option value="weight">Sort by Weight</option>
+                                        <option value="name">Sort by Name</option>
+                                        <option value="difficulty">Sort by Difficulty</option>
+                                    </select>
+                                    <span className="text-slate-400 text-sm">{sorted.length} concepts</span>
                                 </div>
-                                
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar">
-                                    {sorted.map((n, idx) => (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-[70vh] overflow-y-auto pr-1">
+                                    {sorted.map(n => (
                                         <div key={n.id || n.name} onClick={() => { setSelected(n); fetchRootCause(n.name) }}
-                                            className="group relative bg-slate-800/40 backdrop-blur-md rounded-2xl border border-slate-700/50 p-6 cursor-pointer hover:border-cyan-500/50 hover:bg-slate-800/80 transition-all duration-300 overflow-hidden"
-                                            style={{ animationDelay: `${(idx % 15) * 50}ms`, animationFillMode: 'both' }}
-                                            className="animate-fade-in group relative bg-slate-800/40 backdrop-blur-md rounded-2xl border border-slate-700/50 p-6 cursor-pointer hover:border-cyan-500/50 hover:bg-slate-800/80 transition-all duration-300 overflow-hidden">
-                                            
-                                            {/* Top gradient highlight */}
-                                            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-cyan-500/0 to-transparent group-hover:via-cyan-500/50 transition-all duration-500"></div>
-                                            
-                                            <div className="flex justify-between items-start mb-3">
-                                                <h3 className="text-white font-bold text-lg leading-tight group-hover:text-transparent group-hover:bg-clip-text group-hover:bg-gradient-to-r group-hover:from-cyan-300 group-hover:to-blue-400 transition-all">{n.name}</h3>
-                                                <div className="shrink-0 ml-3"><MasteryBadge v={n.mastery} /></div>
+                                            className="bg-slate-800/60 backdrop-blur-sm rounded-xl border border-slate-700/50 p-5 cursor-pointer hover:border-cyan-500/40 hover:shadow-lg hover:shadow-cyan-500/10 transition group">
+                                            <div className="flex justify-between items-start mb-2">
+                                                <h3 className="text-white font-semibold group-hover:text-cyan-300 transition">{n.name}</h3>
+                                                <MasteryBadge v={n.mastery} />
                                             </div>
-                                            
-                                            {n.description && <p className="text-slate-400 text-sm line-clamp-2 mb-4 leading-relaxed group-hover:text-slate-300 transition-colors">{n.description}</p>}
-                                            
-                                            <div className="flex gap-2 flex-wrap mt-auto">
-                                                <span className="px-2.5 py-1 rounded-md text-xs font-semibold" style={{ background: LAYER_COLORS[n.layer ?? 2] + '22', color: LAYER_COLORS[n.layer ?? 2], border: `1px solid ${LAYER_COLORS[n.layer ?? 2]}55` }}>L{n.layer ?? '?'} {LAYER_NAMES[n.layer ?? 2]}</span>
-                                                <span className="px-2.5 py-1 rounded-md text-xs font-medium text-white shadow-sm" style={{ background: CAT_COLORS[n.category] || CAT_COLORS.default }}>{n.category || 'topic'}</span>
-                                                <span className="px-2.5 py-1 rounded-md text-xs font-medium text-white shadow-sm" style={{ background: DIFF_COLORS[n.difficulty] || '#3b82f6' }}>{n.difficulty}</span>
-                                                <span className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900/80 text-indigo-300 border border-indigo-500/20">{n.bloom_level}</span>
-                                                {n.weight > 0 && <span className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900/80 text-emerald-400 border border-emerald-500/20">SIF: {n.weight.toFixed(2)}</span>}
+                                            {n.description && <p className="text-slate-400 text-sm line-clamp-2 mb-3">{n.description}</p>}
+                                            <div className="flex gap-2 flex-wrap">
+                                                <span className="px-2 py-0.5 rounded text-xs font-medium" style={{ background: LAYER_COLORS[n.layer ?? 2] + '33', color: LAYER_COLORS[n.layer ?? 2], border: `1px solid ${LAYER_COLORS[n.layer ?? 2]}44` }}>L{n.layer ?? '?'} {LAYER_NAMES[n.layer ?? 2]}</span>
+                                                <span className="px-2 py-0.5 rounded text-xs text-white" style={{ background: CAT_COLORS[n.category] || CAT_COLORS.default }}>{n.category || 'topic'}</span>
+                                                <span className="px-2 py-0.5 rounded text-xs text-white" style={{ background: DIFF_COLORS[n.difficulty] || '#3b82f6' }}>{n.difficulty}</span>
+                                                <span className="px-2 py-0.5 rounded text-xs bg-indigo-900/50 text-indigo-300">{n.bloom_level}</span>
+                                                {n.weight > 0 && <span className="px-2 py-0.5 rounded text-xs bg-emerald-900/40 text-emerald-300 border border-emerald-700/40">w={n.weight.toFixed(3)}</span>}
                                             </div>
                                         </div>
                                     ))}
-                                    {sorted.length === 0 && (
-                                        <div className="col-span-full h-64 flex flex-col items-center justify-center bg-slate-900/30 rounded-2xl border border-slate-800 border-dashed">
-                                            <span className="text-5xl mb-4 opacity-50">📚</span>
-                                            <p className="text-slate-400 text-lg">{graph.nodes.length === 0 ? 'No concepts found. Build your Knowledge Graph first!' : 'No concepts match your current search.'}</p>
-                                        </div>
-                                    )}
+                                    {sorted.length === 0 && <p className="text-slate-400 col-span-full text-center py-12">{graph.nodes.length === 0 ? 'No concepts found. Build your Knowledge Graph first!' : 'No concepts match your search.'}</p>}
                                 </div>
                             </div>
                             )
@@ -959,48 +901,43 @@ export default function KnowledgeGraphPage() {
 
                         {/* ── Build Tab ── */}
                         {tab === 'build' && (
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in animation-delay-200">
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             {preprocessLog && (
-                                <div className="lg:col-span-2 bg-slate-900/80 rounded-2xl border border-cyan-500/30 p-6 font-mono text-sm shadow-[0_0_30px_-10px_rgba(6,182,212,0.2)]">
-                                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-cyan-500/20">
-                                        <h4 className="text-cyan-400 font-bold flex items-center gap-2"><span>🔬</span> Preprocessing Pipeline Log</h4>
-                                        <button onClick={() => setPreprocessLog(null)} className="text-slate-500 hover:text-white px-3 py-1 rounded bg-slate-800 transition-colors">✕ dismiss</button>
+                                <div className="lg:col-span-2 bg-slate-900/80 rounded-2xl border border-cyan-500/20 p-5 font-mono text-xs">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <h4 className="text-cyan-400 font-bold text-sm">🔬 Preprocessing Pipeline Log</h4>
+                                        <button onClick={() => setPreprocessLog(null)} className="text-slate-500 hover:text-white text-xs">✕ dismiss</button>
                                     </div>
-                                    <div className="space-y-1.5 text-slate-300 bg-black/40 p-4 rounded-xl">
-                                        <p className="text-slate-400 font-semibold">║ INPUT&nbsp;&nbsp;&nbsp;: <span className="text-white font-normal">{preprocessLog.input_chars} chars, {preprocessLog.input_lines} lines</span></p>
+                                    <div className="space-y-1 text-slate-300">
+                                        <p className="text-slate-400">║ INPUT&nbsp;&nbsp;&nbsp;: <span className="text-white">{preprocessLog.input_chars} chars, {preprocessLog.input_lines} lines</span></p>
                                         {preprocessLog.stages?.map((s, i) => (
-                                            <p key={i} className="text-slate-500">║ <span className="text-yellow-400/90">{s.label}</span> : <span className="text-slate-300">{s.detail}</span></p>
+                                            <p key={i} className="text-slate-400">║ <span className="text-yellow-400">{s.label}</span> : <span className="text-white">{s.detail}</span></p>
                                         ))}
-                                        <p className="text-slate-400 font-semibold pt-2">║ OUTPUT&nbsp;&nbsp;: <span className="text-emerald-400 font-normal">{preprocessLog.output_chars} chars, {preprocessLog.output_lines} lines</span></p>
-                                        <p className="text-slate-400 font-semibold">║ TOTAL&nbsp;&nbsp;&nbsp;: <span className="text-red-400 font-normal">-{preprocessLog.total_removed} chars ({preprocessLog.reduction_pct}% reduction)</span></p>
+                                        <p className="text-slate-400">║ OUTPUT&nbsp;&nbsp;: <span className="text-emerald-400">{preprocessLog.output_chars} chars, {preprocessLog.output_lines} lines</span></p>
+                                        <p className="text-slate-400">║ TOTAL&nbsp;&nbsp;&nbsp;: <span className="text-red-400">-{preprocessLog.total_removed} chars ({preprocessLog.reduction_pct}% reduction)</span></p>
                                     </div>
                                 </div>
                             )}
-                                <div className="bg-slate-800/40 backdrop-blur-md rounded-3xl border border-slate-700/50 p-8 shadow-xl hover:shadow-2xl hover:border-cyan-500/30 transition-all duration-300 group">
-                                    <h3 className="text-white font-extrabold text-xl mb-6 flex items-center gap-3"><span className="p-2 bg-blue-500/20 rounded-lg">📄</span> Upload PDF / File</h3>
-                                    <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-600/80 rounded-2xl p-10 text-center cursor-pointer hover:border-cyan-400 hover:bg-slate-800/50 transition-all duration-300 group-hover:border-slate-500">
+                                <div className="bg-slate-800/60 backdrop-blur-sm rounded-2xl border border-slate-700/50 p-6">
+                                    <h3 className="text-white font-bold text-lg mb-4 flex items-center gap-2">📄 Upload PDF / File</h3>
+                                    <label className="block border-2 border-dashed border-slate-600 rounded-xl p-8 text-center cursor-pointer hover:border-cyan-500/50 transition">
                                         <input type="file" accept=".pdf,.txt,.docx" className="hidden" onChange={e => setUploadFile(e.target.files?.[0] || null)} />
-                                        <div className="w-16 h-16 mb-4 bg-slate-800 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform shadow-inner border border-slate-700">
-                                            <span className="text-3xl">📁</span>
-                                        </div>
-                                        <span className="text-slate-200 font-medium text-lg mb-1">{uploadFile ? uploadFile.name : 'Click or drag file here'}</span>
-                                        <span className="text-slate-500 text-sm">Supports PDF, TXT, DOCX up to 10MB</span>
+                                        <span className="text-4xl block mb-2">📁</span>
+                                        <span className="text-slate-300">{uploadFile ? uploadFile.name : 'Click to select file'}</span>
                                     </label>
                                     <button onClick={handleUpload} disabled={!uploadFile || uploading}
-                                        className="mt-6 w-full py-4 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-[0_0_25px_rgba(6,182,212,0.4)] transition-all duration-300 flex justify-center items-center gap-2">
-                                        {uploading ? <><span className="animate-spin text-xl">⏳</span> Processing…</> : <><span className="text-xl">🚀</span> Build Knowledge Graph</>}
+                                        className="mt-4 w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-xl font-semibold disabled:opacity-50 hover:shadow-lg hover:shadow-cyan-500/25 transition">
+                                        {uploading ? 'Processing…' : '🚀 Build Knowledge Graph'}
                                     </button>
                                 </div>
-                                <div className="bg-slate-800/40 backdrop-blur-md rounded-3xl border border-slate-700/50 p-8 shadow-xl hover:shadow-2xl hover:border-violet-500/30 transition-all duration-300 group">
-                                    <h3 className="text-white font-extrabold text-xl mb-6 flex items-center gap-3"><span className="p-2 bg-purple-500/20 rounded-lg">✍️</span> Paste Text directly</h3>
-                                    <div className="relative">
-                                        <textarea value={buildText} onChange={e => setBuildText(e.target.value)} rows={9}
-                                            placeholder="Paste your syllabus, lecture notes, textbook chapters, or any educational text here..."
-                                            className="w-full bg-slate-900/60 border border-slate-600/80 rounded-2xl p-5 text-slate-200 placeholder-slate-500 resize-none focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 focus:outline-none transition-all shadow-inner" />
-                                    </div>
+                                <div className="bg-slate-800/60 backdrop-blur-sm rounded-2xl border border-slate-700/50 p-6">
+                                    <h3 className="text-white font-bold text-lg mb-4 flex items-center gap-2">✍️ Paste Text</h3>
+                                    <textarea value={buildText} onChange={e => setBuildText(e.target.value)} rows={8}
+                                        placeholder="Paste your syllabus, lecture notes, or any educational text here..."
+                                        className="w-full bg-slate-900/50 border border-slate-600 rounded-xl p-4 text-slate-200 placeholder-slate-500 resize-none focus:border-cyan-500 focus:outline-none" />
                                     <button onClick={handleBuildText} disabled={!buildText.trim() || building}
-                                        className="mt-6 w-full py-4 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-[0_0_25px_rgba(139,92,246,0.4)] transition-all duration-300 flex justify-center items-center gap-2">
-                                        {building ? <><span className="animate-spin text-xl">⏳</span> Extracting…</> : <><span className="text-xl">🧠</span> Extract Concepts</>}
+                                        className="mt-4 w-full py-3 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-xl font-semibold disabled:opacity-50 hover:shadow-lg hover:shadow-violet-500/25 transition">
+                                        {building ? 'Extracting…' : '🧠 Extract Concepts'}
                                     </button>
                                 </div>
                             </div>
@@ -1008,56 +945,35 @@ export default function KnowledgeGraphPage() {
 
                         {/* ── Analysis Tab ── */}
                         {tab === 'analysis' && (
-                            <div className="space-y-6 animate-fade-in animation-delay-200">
-                                <div className="bg-slate-800/40 backdrop-blur-md rounded-3xl border border-slate-700/50 p-8 shadow-xl">
-                                    <div className="flex items-center gap-3 mb-6">
-                                        <div className="p-2 bg-red-500/20 rounded-lg text-red-400 text-xl">⚠️</div>
-                                        <h3 className="text-white font-extrabold text-xl">Weak Concepts (below 50% mastery)</h3>
-                                    </div>
-                                    
+                            <div className="space-y-6">
+                                <div className="bg-slate-800/60 backdrop-blur-sm rounded-2xl border border-slate-700/50 p-6">
+                                    <h3 className="text-white font-bold text-lg mb-4">⚠️ Weak Concepts (below 50% mastery)</h3>
                                     {weaknesses.length > 0 ? (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {weaknesses.map((w, idx) => (
+                                        <div className="space-y-3">
+                                            {weaknesses.map(w => (
                                                 <div key={w.name} onClick={() => fetchRootCause(w.name)}
-                                                    className="bg-slate-900/60 rounded-2xl p-5 flex items-center justify-between cursor-pointer hover:border-orange-500/50 border border-slate-700/50 hover:bg-slate-800/80 transition-all shadow-md group animate-fade-in" style={{ animationDelay: `${idx * 100}ms` }}>
+                                                    className="bg-slate-900/50 rounded-xl p-4 flex items-center justify-between cursor-pointer hover:border-orange-500/40 border border-transparent transition">
                                                     <div>
-                                                        <p className="text-white font-bold text-lg group-hover:text-orange-300 transition-colors">{w.name}</p>
-                                                        <div className="flex gap-2 mt-1">
-                                                            <span className="text-slate-400 text-xs bg-slate-800 px-2 py-0.5 rounded">{w.category}</span>
-                                                            <span className="text-slate-400 text-xs bg-slate-800 px-2 py-0.5 rounded">{w.difficulty}</span>
-                                                        </div>
+                                                        <p className="text-white font-medium">{w.name}</p>
+                                                        <p className="text-slate-400 text-sm">{w.category} · {w.difficulty}</p>
                                                     </div>
-                                                    <div className="scale-110"><MasteryBadge v={w.mastery} /></div>
+                                                    <MasteryBadge v={w.mastery} />
                                                 </div>
                                             ))}
                                         </div>
-                                    ) : (
-                                        <div className="flex flex-col items-center justify-center py-8 bg-slate-900/30 rounded-2xl border border-slate-800 border-dashed">
-                                            <span className="text-6xl mb-4">🎉</span>
-                                            <p className="text-emerald-400 font-bold text-xl">No weak concepts!</p>
-                                            <p className="text-slate-400">You are demonstrating strong mastery across the board.</p>
-                                        </div>
-                                    )}
+                                    ) : <p className="text-emerald-400">✅ No weak concepts! Great work!</p>}
                                 </div>
                                 {rootCause && rootCause.root_cause && (
-                                    <div className="bg-gradient-to-r from-orange-500/10 via-red-500/5 to-orange-500/10 rounded-3xl border border-orange-500/30 p-8 shadow-[0_0_30px_-10px_rgba(249,115,22,0.2)] animate-fade-in relative overflow-hidden">
-                                        <div className="absolute top-0 left-0 w-1.5 h-full bg-gradient-to-b from-orange-400 to-red-500"></div>
-                                        <h3 className="text-orange-400 font-extrabold text-xl mb-3 flex items-center gap-2"><span>🔍</span> Root Cause Analysis</h3>
-                                        <p className="text-slate-200 text-lg leading-relaxed mb-6">{rootCause.message}</p>
+                                    <div className="bg-gradient-to-r from-orange-500/10 to-red-500/10 rounded-2xl border border-orange-500/30 p-6">
+                                        <h3 className="text-orange-300 font-bold text-lg mb-2">🔍 Root Cause Analysis</h3>
+                                        <p className="text-slate-200">{rootCause.message}</p>
                                         {rootCause.prerequisite_chain?.length > 0 && (
-                                            <div>
-                                                <h4 className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-3">Dependency Chain</h4>
-                                                <div className="flex flex-wrap items-center gap-2 bg-slate-900/50 p-4 rounded-xl border border-slate-700/50">
-                                                    {rootCause.prerequisite_chain.map((p, i) => (
-                                                        <div key={i} className="flex items-center gap-2">
-                                                            <span className={`px-4 py-1.5 rounded-lg text-sm font-medium shadow-sm transition-colors ${i === rootCause.prerequisite_chain.length - 1 ? 'bg-orange-500 text-white shadow-orange-500/20' : 'bg-slate-800 text-slate-300 border border-slate-600 hover:border-slate-400'}`}>
-                                                                {p}
-                                                            </span>
-                                                            {i < rootCause.prerequisite_chain.length - 1 && <span className="text-slate-500 font-bold">→</span>}
-                                                            {i === rootCause.prerequisite_chain.length - 1 && <span className="text-2xl ml-1">🎯</span>}
-                                                        </div>
-                                                    ))}
-                                                </div>
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                {rootCause.prerequisite_chain.map((p, i) => (
+                                                    <span key={i} className="px-3 py-1 rounded-full text-sm bg-slate-800 text-slate-300 border border-slate-600">
+                                                        {p} {i < rootCause.prerequisite_chain.length - 1 ? '→' : '🎯'}
+                                                    </span>
+                                                ))}
                                             </div>
                                         )}
                                     </div>
@@ -1069,101 +985,30 @@ export default function KnowledgeGraphPage() {
 
                 {/* ── Selected Concept Detail Modal ── */}
                 {selected && (
-                    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-fade-in" onClick={() => setSelected(null)}>
-                        <div className="relative bg-slate-900 border border-slate-700/60 rounded-3xl p-8 max-w-lg w-full shadow-[0_0_50px_-12px_rgba(14,165,233,0.25)] overflow-hidden" onClick={e => e.stopPropagation()}>
-                            {/* Decorative top border gradient */}
-                            <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600"></div>
-                            
-                            <div className="flex justify-between items-start mb-6">
-                                <div>
-                                    <span className="text-xs uppercase tracking-wider text-slate-500 font-bold block mb-1">Concept Details</span>
-                                    <h2 className="text-2xl md:text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300">{selected.name}</h2>
-                                </div>
-                                <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 w-8 h-8 rounded-full flex items-center justify-center transition-colors">✕</button>
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6" onClick={() => setSelected(null)}>
+                        <div className="bg-slate-800 rounded-2xl border border-slate-600 p-8 max-w-lg w-full shadow-2xl" onClick={e => e.stopPropagation()}>
+                            <div className="flex justify-between items-start mb-4">
+                                <h2 className="text-2xl font-bold text-white">{selected.name}</h2>
+                                <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-white text-xl">✕</button>
                             </div>
-                            
-                            {selected.description && (
-                                <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 mb-6">
-                                    <p className="text-slate-200 text-sm leading-relaxed">{selected.description}</p>
-                                </div>
-                            )}
-                            
-                            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">Ontology Layer</p><p className="text-slate-200 font-medium">L{selected.layer ?? '?'} {LAYER_NAMES[selected.layer ?? 2]}</p></div>
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors flex flex-col justify-center"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">Mastery</p><div><MasteryBadge v={selected.mastery} /></div></div>
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">Difficulty</p><p className="text-slate-200 font-medium capitalize flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: DIFF_COLORS[selected.difficulty] || '#3b82f6' }}></span>{selected.difficulty}</p></div>
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">Bloom Level</p><p className="text-indigo-300 font-medium capitalize">{selected.bloom_level}</p></div>
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">Category</p><p className="text-cyan-300 font-medium capitalize">{selected.category}</p></div>
-                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/50 hover:border-slate-600 transition-colors"><p className="text-slate-500 text-xs font-semibold uppercase tracking-wide mb-1">SIF Weight</p><p className="text-emerald-400 font-medium font-mono text-sm">{(selected.weight || 0).toFixed(4)}</p></div>
+                            {selected.description && <p className="text-slate-300 mb-4">{selected.description}</p>}
+                            <div className="grid grid-cols-2 gap-3 mb-4">
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">Layer</p><p className="text-white font-medium">L{selected.layer ?? '?'} {LAYER_NAMES[selected.layer ?? 2]}</p></div>
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">Mastery</p><MasteryBadge v={selected.mastery} /></div>
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">Difficulty</p><p className="text-white font-medium">{selected.difficulty}</p></div>
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">Bloom Level</p><p className="text-white font-medium capitalize">{selected.bloom_level}</p></div>
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">Category</p><p className="text-white font-medium capitalize">{selected.category}</p></div>
+                                <div className="bg-slate-700/50 rounded-lg p-3"><p className="text-slate-400 text-xs">SIF Weight</p><p className="text-white font-medium">{(selected.weight || 0).toFixed(4)}</p></div>
                             </div>
-                            
                             {rootCause?.message && (
-                                <div className="bg-gradient-to-r from-orange-500/10 to-red-500/10 border border-orange-500/30 rounded-xl p-4 shadow-inner">
-                                    <h4 className="text-orange-400 font-bold text-xs uppercase tracking-wide mb-2 flex items-center gap-2"><span>⚠️</span> Root Cause Analysis</h4>
-                                    <p className="text-orange-200/90 text-sm leading-relaxed">{rootCause.message}</p>
+                                <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-4">
+                                    <p className="text-orange-200 text-sm">{rootCause.message}</p>
                                 </div>
                             )}
                         </div>
                     </div>
                 )}
             </div>
-
-            <style jsx>{`
-                @keyframes fade-in {
-                    from {
-                        opacity: 0;
-                        transform: translateY(10px);
-                    }
-                    to {
-                        opacity: 1;
-                        transform: translateY(0);
-                    }
-                }
-                
-                .animate-fade-in {
-                    animation: fade-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-                    opacity: 0;
-                }
-                
-                .animation-delay-100 {
-                    animation-delay: 0.1s;
-                }
-                
-                .animation-delay-200 {
-                    animation-delay: 0.2s;
-                }
-                
-                .animation-delay-300 {
-                    animation-delay: 0.3s;
-                }
-                
-                .animation-delay-2000 {
-                    animation-delay: 2s;
-                }
-                
-                .animation-delay-4000 {
-                    animation-delay: 4s;
-                }
-
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 6px;
-                }
-                
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: rgba(15, 23, 42, 0.3);
-                    border-radius: 4px;
-                }
-                
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: rgba(56, 189, 248, 0.3);
-                    border-radius: 4px;
-                    transition: background 0.3s;
-                }
-                
-                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-                    background: rgba(56, 189, 248, 0.6);
-                }
-            `}</style>
-        </main>
+        </div>
     )
 }

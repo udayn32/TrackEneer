@@ -19,9 +19,12 @@ The mentor operates in multiple pedagogical modes:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -53,16 +56,18 @@ except ImportError:
 
 # ─── Gemini ───
 try:
-    import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not set")
-    genai.configure(api_key=GEMINI_API_KEY)
-    _gemini = genai.GenerativeModel("gemini-2.5-flash")
+    from ai_client import build_text_model
+
+    _gemini = build_text_model()
+    if not _gemini:
+        raise ValueError("No AI model configured")
     HAS_GEMINI = True
 except Exception:
     HAS_GEMINI = False
     _gemini = None
+
+logger = logging.getLogger(__name__)
+LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "20"))
 
 
 # ============================================================================
@@ -132,7 +137,7 @@ class GraphRAGRetriever:
                 metadatas=[meta],
             )
 
-    def retrieve(self, query: str, user_email: str, top_k: int = 5) -> dict:
+    def retrieve(self, query: str, user_email: str, top_k: int = 5, graph_only: bool = False) -> dict:
         """
         Full GraphRAG retrieval pipeline:
         1. Identify concepts in query
@@ -140,28 +145,38 @@ class GraphRAGRetriever:
         3. Retrieve similar text chunks from vector store
         4. Assemble unified context
         """
-        # Step 1: Identify concepts mentioned in the query
-        graph_context = self._retrieve_graph_context(query, user_email)
+        try:
+            # Step 1: Identify concepts mentioned in the query
+            graph_context = self._retrieve_graph_context(query, user_email)
+        except Exception as e:
+            logger.warning("Graph context retrieval failed: %s", e)
+            graph_context = {"concepts": [], "prerequisites": [], "relations": [], "related": []}
 
-        # Step 2: Retrieve text chunks from vector store
-        vector_context = self._retrieve_vector_context(query, user_email, top_k)
+        vector_context = []
+        if not graph_only:
+            try:
+                # Step 2: Retrieve text chunks from vector store
+                vector_context = self._retrieve_vector_context(query, user_email, top_k)
+            except Exception as e:
+                logger.warning("Vector context retrieval failed: %s", e)
+                vector_context = []
 
         # Step 3: Assemble context
-        context = self._assemble_context(graph_context, vector_context)
-
-        return context
+        return self._assemble_context(graph_context, vector_context)
 
     def _retrieve_graph_context(self, query: str, user_email: str) -> dict:
         """Retrieve structured context from the Knowledge Graph."""
-        # Get the full graph to find matching concepts
-        graph = self.kg_store.get_full_graph(user_email)
-        if not graph["nodes"]:
+        nodes = self.kg_store.search_concepts(user_email, query, limit=20)
+        edges = []
+        if not nodes:
+            nodes = self.kg_store.get_recent_concepts(user_email, limit=120)
+        if not nodes:
             return {"concepts": [], "prerequisites": [], "relations": []}
 
         # Find concepts mentioned in query (fuzzy match)
         query_lower = query.lower()
         matching_concepts = []
-        for node in graph["nodes"]:
+        for node in nodes:
             name_lower = node["name"].lower()
             if name_lower in query_lower or any(
                 word in query_lower for word in name_lower.split() if len(word) > 3
@@ -172,13 +187,13 @@ class GraphRAGRetriever:
         if not matching_concepts and self.embed_model:
             try:
                 query_emb = self.embed_model.encode([query])[0]
-                concept_names = [n["name"] for n in graph["nodes"]]
+                concept_names = [n["name"] for n in nodes]
                 concept_embs = self.embed_model.encode(concept_names)
 
                 similarities = []
                 for i, emb in enumerate(concept_embs):
                     sim = float(np.dot(query_emb, emb) / (np.linalg.norm(query_emb) * np.linalg.norm(emb) + 1e-8))
-                    similarities.append((graph["nodes"][i], sim))
+                    similarities.append((nodes[i], sim))
 
                 similarities.sort(key=lambda x: x[1], reverse=True)
                 matching_concepts = [s[0] for s in similarities[:3] if s[1] > 0.3]
@@ -197,13 +212,14 @@ class GraphRAGRetriever:
             try:
                 subgraph = self.kg_store.get_subgraph(concept["name"], user_email, hops=1)
                 all_related.extend(subgraph.get("nodes", []))
+                edges.extend(subgraph.get("edges", []))
             except Exception:
                 pass
 
         return {
             "concepts": matching_concepts[:5],
             "prerequisites": all_prereqs[:10],
-            "relations": graph["edges"][:20],
+            "relations": edges[:20],
             "related": all_related[:10],
         }
 
@@ -425,11 +441,38 @@ FORMAT:
         Returns:
             Response dict with answer, citations, and metadata
         """
+        if not message or not message.strip():
+            return {
+                "answer": "Please enter a message so I can help you.",
+                "session_id": session_id or str(uuid.uuid4()),
+                "mode": mode,
+                "citations": [],
+                "confidence": 0,
+                "error": False,
+            }
+
         if not HAS_GEMINI or not _gemini:
-            return self._fallback_response(message)
+            return self._fallback_response(message, session_id=session_id, mode=mode)
+
+        if mode not in self.SYSTEM_PROMPTS:
+            mode = "socratic"
 
         # Step 1: Retrieve context via GraphRAG
-        context = self.retriever.retrieve(message, user_email)
+        try:
+            graph_only = mode == "connect"
+            retrieval_top_k = 3 if graph_only else 5
+            context = self.retriever.retrieve(message, user_email, top_k=retrieval_top_k, graph_only=graph_only)
+        except Exception as e:
+            logger.exception("Mentor retrieval pipeline failed")
+            context = {
+                "context_text": "No specific context found in your materials.",
+                "graph_concepts": [],
+                "prerequisites": [],
+                "vector_chunks": [],
+                "has_graph_context": False,
+                "has_vector_context": False,
+                "retrieval_error": str(e),
+            }
 
         # Step 2: Build the LLM prompt
         system_prompt = self.SYSTEM_PROMPTS.get(mode, self.SYSTEM_PROMPTS["socratic"])
@@ -451,16 +494,33 @@ FORMAT:
         )
 
         # Step 4: Generate response
+        executor = ThreadPoolExecutor(max_workers=1)
         try:
-            response = _gemini.generate_content(full_prompt)
-            answer = response.text.strip()
+            future = executor.submit(_gemini.generate_content, full_prompt)
+            response = future.result(timeout=LLM_REQUEST_TIMEOUT)
+            answer = (getattr(response, "text", "") or "").strip()
+            if not answer:
+                answer = "I could not generate a complete response this time. Please try rephrasing your question."
+        except FuturesTimeoutError:
+            executor.shutdown(wait=False, cancel_futures=True)
+            return {
+                "answer": "The AI mentor took too long to respond. Please try again, or switch the model/provider configuration.",
+                "session_id": session_id,
+                "mode": mode,
+                "citations": self._extract_citations(context),
+                "confidence": self._calculate_response_confidence(context),
+                "error": True,
+            }
         except Exception as e:
+            executor.shutdown(wait=False, cancel_futures=True)
             return {
                 "answer": f"I'm having trouble generating a response right now. Error: {str(e)}",
                 "session_id": session_id,
                 "mode": mode,
                 "error": True,
             }
+        else:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Step 5: Post-process and extract citations
         citations = self._extract_citations(context)
@@ -510,9 +570,10 @@ FORMAT:
             parts.append(f"\n\n--- FOCUS CONCEPT ---\nThe student wants to focus on: {concept_focus}")
 
         # Add conversation history
+        history_limit = 4 if mode == "connect" else 6
         if history:
             parts.append("\n\n--- CONVERSATION HISTORY ---")
-            for msg in history[-6:]:  # Last 6 messages
+            for msg in history[-history_limit:]:
                 role = "Student" if msg["role"] == "student" else "Mentor"
                 parts.append(f"{role}: {msg['content'][:300]}")
 
@@ -526,6 +587,8 @@ FORMAT:
             parts.append("\nGenerate quiz questions based on the context above.")
         elif mode == "plan":
             parts.append("\nCreate a concrete, actionable study plan based on the mastery levels shown.")
+        elif mode == "connect":
+            parts.append("\nPrioritize concise concept relationships and prerequisite links over long explanations.")
 
         return "\n".join(parts)
 
@@ -572,13 +635,13 @@ FORMAT:
 
         return min(confidence, 1.0)
 
-    def _fallback_response(self, message: str) -> dict:
+    def _fallback_response(self, message: str, session_id: str = "", mode: str = "fallback") -> dict:
         """Fallback when Gemini is not available."""
         return {
             "answer": "I'm currently unable to generate AI responses. Please ensure the Gemini API is configured. "
                       "In the meantime, try reviewing your uploaded notes or checking the Knowledge Graph for related concepts.",
-            "session_id": str(uuid.uuid4()),
-            "mode": "fallback",
+            "session_id": session_id or str(uuid.uuid4()),
+            "mode": mode,
             "citations": [],
             "confidence": 0,
             "error": True,
@@ -664,6 +727,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def mentor_request_timing(request: Request, call_next):
+    if not request.url.path.startswith("/api/mentor"):
+        return await call_next(request)
+
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("Mentor route failed: %s (%sms)", request.url.path, elapsed_ms)
+        raise
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    response.headers["X-Mentor-Time-Ms"] = str(elapsed_ms)
+    if elapsed_ms > 3000:
+        logger.warning("Slow mentor route: %s took %sms", request.url.path, elapsed_ms)
+    return response
+
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "demo@trackeneer.local")
 mentor = SocraticMentor()
 
@@ -702,15 +785,28 @@ async def mentor_chat(
     - connect: Show relationships between concepts
     - plan: Generate a study plan
     """
-    user_email = _resolve_email(request, email)
-    result = mentor.chat(
-        message=message,
-        user_email=user_email,
-        mode=mode,
-        session_id=session_id,
-        concept_focus=concept_focus,
-    )
-    return {"status": "ok", **result}
+    try:
+        user_email = _resolve_email(request, email)
+        result = mentor.chat(
+            message=message,
+            user_email=user_email,
+            mode=mode,
+            session_id=session_id,
+            concept_focus=concept_focus,
+        )
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.exception("/api/mentor/chat failed")
+        return {
+            "status": "error",
+            "answer": "Mentor service hit an internal error. Please try again.",
+            "session_id": session_id or str(uuid.uuid4()),
+            "mode": mode if mode in SocraticMentor.SYSTEM_PROMPTS else "socratic",
+            "citations": [],
+            "confidence": 0,
+            "error": True,
+            "detail": str(e),
+        }
 
 
 # ─── Study recommendations ───

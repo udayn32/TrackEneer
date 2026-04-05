@@ -1,11 +1,23 @@
 'use client'
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
+import { useSearchParams } from 'next/navigation'
 
-const API = process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, '') || 'http://localhost:5000'
+const API = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://localhost:5000'
 const APTITUDE_API = 'https://aptitude-gold.vercel.app/Random'
 const TOTAL_QUESTIONS = 20
 const TEST_DURATION = 20 * 60 // 20 minutes in seconds
+const CAREER_FETCH_TIMEOUT_MS = 10000
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = CAREER_FETCH_TIMEOUT_MS) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+        return await fetch(url, { ...options, signal: controller.signal })
+    } finally {
+        clearTimeout(timeoutId)
+    }
+}
 
 function RadialGauge({ value, size = 120, label, color = '#06b6d4' }) {
     const pct = Math.round((value || 0) * 100)
@@ -41,9 +53,100 @@ function TimerDisplay({ seconds }) {
     )
 }
 
+// ─── Company Context Render ───
+function formatCompanyContent(content) {
+    if (!content) return null
+
+    const parseInlineMarkdown = (text) => {
+        const parts = text.split(/(\*\*.*?\*\*)/g)
+        return parts.map((part, i) => {
+            if (part.startsWith('**') && part.endsWith('**')) {
+                return <strong key={i} className="font-semibold text-white">{part.slice(2, -2)}</strong>
+            }
+            return <span key={i}>{part}</span>
+        })
+    }
+
+    const blocks = []
+    let bulletItems = []
+
+    const flushBullets = (key) => {
+        if (!bulletItems.length) return
+        blocks.push(
+            <ul key={key} className="space-y-3 pl-5 list-disc marker:text-cyan-400">
+                {bulletItems.map((item, idx) => (
+                    <li key={`${key}-${idx}`} className="text-[15px] leading-7 text-slate-200">
+                        {parseInlineMarkdown(item)}
+                    </li>
+                ))}
+            </ul>
+        )
+        bulletItems = []
+    }
+
+    content.split('\n').forEach((rawLine, idx) => {
+        const line = rawLine.trim()
+        if (!line) {
+            flushBullets(`bullets-${idx}`)
+            return
+        }
+
+        const bulletMatch = line.match(/^[-*]\s+(.*)$/)
+        if (bulletMatch) {
+            bulletItems.push(bulletMatch[1].trim())
+            return
+        }
+
+        flushBullets(`bullets-${idx}`)
+
+        if (line === line.toUpperCase() || (line.endsWith(':') && !line.startsWith('**'))) {
+            blocks.push(
+                <h4 key={`heading-${idx}`} className="pt-3 text-sm font-semibold uppercase tracking-[0.22em] text-slate-400">
+                    {line.replace(/[*:]/g, '').trim()}
+                </h4>
+            )
+            return
+        }
+
+        blocks.push(
+            <p key={`para-${idx}`} className="text-[15px] leading-8 text-slate-200">
+                {parseInlineMarkdown(line)}
+            </p>
+        )
+    })
+
+    flushBullets('bullets-final')
+    return <div className="space-y-4">{blocks}</div>
+}
+
+function CompanySectionCard({ title, accent, content, className = '' }) {
+    return (
+        <section className={`rounded-2xl border bg-slate-900/80 p-7 shadow-lg backdrop-blur-sm ${accent} ${className}`}>
+            <h3 className="mb-5 text-2xl font-bold text-white">{title}</h3>
+            <div className="max-w-none">{formatCompanyContent(content)}</div>
+        </section>
+    )
+}
+
+function hasMeaningfulCompanySection(content) {
+    if (!content) return false
+    const normalized = content.replace(/\s+/g, ' ').trim().toLowerCase()
+    if (!normalized) return false
+    return !normalized.includes('please refer to the vision and mission section above')
+}
+
 export default function CareerPage() {
     const { data: session } = useSession()
+    const searchParams = useSearchParams()
     const [tab, setTab] = useState('resume')
+
+    // Initialize tab from query parameter if present
+    useEffect(() => {
+        const tabParam = searchParams?.get('tab')
+        if (tabParam && ['resume', 'aptitude', 'trends', 'company'].includes(tabParam)) {
+            setTab(tabParam)
+        }
+    }, [searchParams])
 
     // ── Resume state ──
     const [roles, setRoles] = useState([])
@@ -55,10 +158,10 @@ export default function CareerPage() {
     const email = session?.user?.email || ''
 
     // ── Aptitude Test state ──
-    const [testPhase, setTestPhase] = useState('idle') // idle | loading | active | finished
+    const [testPhase, setTestPhase] = useState('idle')
     const [questions, setQuestions] = useState([])
     const [currentQ, setCurrentQ] = useState(0)
-    const [answers, setAnswers] = useState({}) // { index: selectedOption }
+    const [answers, setAnswers] = useState({})
     const [timeLeft, setTimeLeft] = useState(TEST_DURATION)
     const [testResult, setTestResult] = useState(null)
     const [fetchError, setFetchError] = useState(null)
@@ -70,11 +173,18 @@ export default function CareerPage() {
     const [trendsError, setTrendsError] = useState(null)
     const [trendsFetched, setTrendsFetched] = useState(false)
 
+    // ── Company Research state ──
+    const [companyName, setCompanyName] = useState('')
+    const [website, setWebsite] = useState('')
+    const [companyLoading, setCompanyLoading] = useState(false)
+    const [companyData, setCompanyData] = useState(null)
+    const [companyError, setCompanyError] = useState('')
+
     useEffect(() => {
         fetch(`${API}/api/career/roles`).then(r => r.json()).then(d => setRoles(d.roles || [])).catch(() => { })
     }, [])
 
-    // ── Auto-fetch trends when switching to tab with resume data ──
+    // ── Auto-fetch trends when switching to tab ──
     useEffect(() => {
         if (tab === 'trends' && !trendsFetched && resumeResult?.analysis) {
             fetchTrends()
@@ -157,6 +267,57 @@ export default function CareerPage() {
         }
     }
 
+    // ── Company handlers ──
+    const handleGenerateCompany = async (e) => {
+        e.preventDefault()
+        if (!companyName.trim()) {
+            setCompanyError('Please enter a company name')
+            return
+        }
+
+        setCompanyLoading(true)
+        setCompanyError('')
+        setCompanyData(null)
+
+        try {
+            const formData = new FormData()
+            formData.append('company_name', companyName)
+            if (website.trim()) {
+                formData.append('website', website)
+            }
+            if (email) {
+                formData.append('email', email)
+            }
+
+            const response = await fetchWithTimeout(
+                `${API}/api/career/companies/generate`,
+                {
+                    method: 'POST',
+                    body: formData,
+                },
+                25000,
+            )
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}))
+                const errorMessage = errorData.detail || 'Failed to generate company information'
+                throw new Error(errorMessage)
+            }
+
+            const data = await response.json()
+            setCompanyData(data)
+            setCompanyError('')
+        } catch (err) {
+            const message = err?.name === 'AbortError'
+                ? 'Company research took too long. Please try again.'
+                : (err.message || 'Failed to generate company information')
+            setCompanyError(message)
+            console.error('Error:', err)
+        } finally {
+            setCompanyLoading(false)
+        }
+    }
+
     // ── Aptitude Test handlers ──
     const startTest = async () => {
         setTestPhase('loading')
@@ -173,7 +334,6 @@ export default function CareerPage() {
                 })
             )
             const results = await Promise.all(fetches)
-            // Deduplicate by question text, fetch more if needed
             const seen = new Set()
             const unique = []
             for (const q of results) {
@@ -183,7 +343,6 @@ export default function CareerPage() {
                 }
             }
             if (unique.length < TOTAL_QUESTIONS) {
-                // fetch extras if duplicates removed some
                 const extra = TOTAL_QUESTIONS - unique.length
                 const moreFetches = Array.from({ length: extra + 5 }, () =>
                     fetch(APTITUDE_API).then(r => r.json()).catch(() => null)
@@ -247,18 +406,19 @@ export default function CareerPage() {
                 {/* Header */}
                 <div className="flex items-center justify-between mb-6">
                     <div>
-                        <h1 className="text-3xl font-bold text-white flex items-center gap-3">🚀 Career Readiness</h1>
-                        <p className="text-slate-400 mt-1">AI Resume Analysis & Aptitude Testing</p>
+                        <h1 className="text-3xl font-bold text-white flex items-center gap-3">🎓 Career Center</h1>
+                        <p className="text-slate-400 mt-1">Resume Analysis, Aptitude Testing & Company Research</p>
                     </div>
                     <a href="/dashboard" className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg hover:bg-slate-700 transition">← Dashboard</a>
                 </div>
 
                 {/* Tabs */}
-                <div className="flex gap-2 mb-6">
+                <div className="flex gap-2 mb-6 flex-wrap">
                     {[
                         { id: 'resume', label: '📄 Resume Analysis' },
                         { id: 'aptitude', label: '🧠 Aptitude Test' },
                         { id: 'trends', label: '🔥 Latest Trends' },
+                        { id: 'company', label: '🏢 Company Research' },
                     ].map(t => (
                         <button key={t.id} onClick={() => setTab(t.id)}
                             className={`px-5 py-2.5 rounded-xl font-medium transition ${
@@ -805,6 +965,126 @@ export default function CareerPage() {
                             </div>
                         )}
                     </>
+                )}
+
+                {/* ════════════════════ COMPANY RESEARCH TAB ════════════════════ */}
+                {tab === 'company' && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-900/80 backdrop-blur-sm rounded-xl p-6 border border-cyan-500/20 shadow-lg">
+                            <h2 className="text-2xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">
+                                Research Company
+                            </h2>
+                            <form onSubmit={handleGenerateCompany} className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-300 mb-2">
+                                        Company Name *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={companyName}
+                                        onChange={(e) => setCompanyName(e.target.value)}
+                                        placeholder="e.g., TCS, Accenture, Google"
+                                        className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg focus:outline-none focus:border-cyan-500 text-white placeholder-slate-500"
+                                        disabled={companyLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-300 mb-2">
+                                        Company Website (Optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={website}
+                                        onChange={(e) => setWebsite(e.target.value)}
+                                        placeholder="e.g., https://www.tcs.com"
+                                        className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg focus:outline-none focus:border-cyan-500 text-white placeholder-slate-500"
+                                        disabled={companyLoading}
+                                    />
+                                </div>
+                                {companyError && (
+                                    <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3 text-red-300">
+                                        {companyError}
+                                    </div>
+                                )}
+                                <button
+                                    type="submit"
+                                    disabled={companyLoading}
+                                    className="w-full bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 disabled:from-slate-700 disabled:to-slate-700 text-white font-medium py-3 px-6 rounded-lg transition-all duration-200 shadow-lg disabled:cursor-not-allowed"
+                                >
+                                    {companyLoading ? 'Generating with AI...' : 'Generate Company Report'}
+                                </button>
+                            </form>
+                        </div>
+
+                        {companyData && (
+                            <div className="space-y-6">
+                                <div className="bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-purple-500/10 backdrop-blur-sm rounded-xl p-6 border border-cyan-500/30 shadow-lg">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <h2 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-400">
+                                                {companyData.company_name}
+                                            </h2>
+                                            {companyData.website && (
+                                                <a href={companyData.website} target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 text-sm mt-1 inline-block">
+                                                    {companyData.website}
+                                                </a>
+                                            )}
+                                            {companyData.cached && (
+                                                <span className="ml-3 text-xs bg-purple-500/20 border border-purple-500/50 px-2 py-1 rounded">
+                                                    Cached Data
+                                                </span>
+                                            )}
+                                        </div>
+                                        {companyData.score_info && (
+                                            <div className="bg-slate-900/80 rounded-xl p-4 border border-cyan-500/30 min-w-[120px] text-center">
+                                                <div className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">
+                                                    {companyData.score_info.score}
+                                                </div>
+                                                <div className="text-xs text-slate-400 mt-1">Overall Score</div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {companyData.score_info?.recommendation && (
+                                        <div className="mt-4 bg-blue-500/10 border border-blue-500/30 rounded-lg p-4">
+                                            <p className="text-blue-300 text-center italic">
+                                                {companyData.score_info.recommendation}
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="space-y-6">
+                                    {hasMeaningfulCompanySection(companyData.sections?.vision_mission) && (
+                                        <CompanySectionCard
+                                            title="Vision and Mission"
+                                            accent="border-cyan-500/20"
+                                            content={companyData.sections?.vision_mission}
+                                        />
+                                    )}
+                                    {(hasMeaningfulCompanySection(companyData.sections?.placement_process) || hasMeaningfulCompanySection(companyData.sections?.company_review)) && (
+                                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                                            {hasMeaningfulCompanySection(companyData.sections?.placement_process) && (
+                                                <CompanySectionCard
+                                                    title="Placement Process"
+                                                    accent="border-purple-500/20"
+                                                    content={companyData.sections?.placement_process}
+                                                />
+                                            )}
+                                            {hasMeaningfulCompanySection(companyData.sections?.company_review) && (
+                                                <CompanySectionCard
+                                                    title="Company Review"
+                                                    accent="border-blue-500/20"
+                                                    content={companyData.sections?.company_review}
+                                                />
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                    </div>
                 )}
             </div>
         </main>

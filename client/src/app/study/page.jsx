@@ -1,750 +1,552 @@
-"use client";
+'use client'
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { useSession } from 'next-auth/react'
 
-import { useEffect, useState } from "react";
-import { useSession } from "next-auth/react";
-import React from "react";
-import dynamic from "next/dynamic";
+const API = process.env.NEXT_PUBLIC_STUDY_API?.replace(/\/$/, '') || process.env.NEXT_PUBLIC_SCHEDULER_API?.replace(/\/$/, '') || 'http://localhost:5000'
 
-const KnowledgeGraph = dynamic(() => import("../../components/KnowledgeGraph"), {
-  ssr: false,
-  loading: () => <div className="p-6 text-slate-400">Loading Knowledge Graph…</div>,
-});
+const DIFF_COLORS = { easy: '#10b981', medium: '#f59e0b', hard: '#ef4444' }
+const REL_COLORS = { PREREQUISITE_OF: '#f97316', PART_OF: '#8b5cf6', RELATED_TO: '#06b6d4', LEADS_TO: '#22c55e' }
+const CAT_COLORS = {
+    topic: '#3b82f6', subtopic: '#8b5cf6', skill: '#06b6d4', theorem: '#f59e0b',
+    algorithm: '#ef4444', definition: '#10b981', formula: '#ec4899', default: '#64748b'
+}
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:5000";
+function MasteryBadge({ v }) {
+    const pct = Math.round((v || 0) * 100)
+    const color = pct >= 80 ? 'from-emerald-500 to-green-400' : pct >= 50 ? 'from-amber-500 to-yellow-400' : 'from-red-500 to-rose-400'
+    return <span className={`px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r ${color} text-white shadow-lg shadow-${color.split('-')[1]}-500/30`}>{pct}%</span>
+}
 
-export default function StudyPage() {
-  const { data: session } = useSession();
-  const [subjects, setSubjects] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [selectedSubject, setSelectedSubject] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [showSubjectModal, setShowSubjectModal] = useState(false);
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [showPreviewModal, setShowPreviewModal] = useState(false);
-  const [previewNote, setPreviewNote] = useState(null);
-  const [stats, setStats] = useState(null);
-  const [showGraph, setShowGraph] = useState(false);
-  const [graphKey, setGraphKey] = useState(0);
-  const [uploadStatus, setUploadStatus] = useState(null);
-
-  // Search states
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState(null);
-  const [searching, setSearching] = useState(false);
-
-  // Form states
-  const [subjectForm, setSubjectForm] = useState({ name: "", description: "" });
-  const [uploadForm, setUploadForm] = useState({ title: "", description: "", file: null });
-
-  // BM25 Search
-  const handleSearch = async (query) => {
-    if (!query.trim()) {
-      setSearchResults(null);
-      return;
+// Enhanced concept card for preview
+function ConceptCard({ node, index }) {
+    const getWeightPercentage = () => node.weight ? Math.round(node.weight * 100) : 0
+    const getDifficultyEmoji = () => {
+        const diffMap = { easy: '🟢', medium: '🟡', hard: '🔴' }
+        return diffMap[node.difficulty] || '🔵'
     }
-    setSearching(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&top_k=10`);
-      const data = await response.json();
-      setSearchResults(data.results);
-    } catch (error) {
-      console.error("Search failed:", error);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  // Debounced search
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      handleSearch(searchQuery);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
-
-  // Helper: build headers with user email
-  const authHeaders = () => {
-    const headers = {};
-    const email = session?.user?.email;
-    if (email) headers["x-user-email"] = email;
-    return headers;
-  };
-
-  // Fetch subjects
-  const fetchSubjects = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/subjects`, { headers: authHeaders() });
-      const data = await response.json();
-      setSubjects(data.subjects || []);
-    } catch (error) {
-      console.error("Error fetching subjects:", error);
-    }
-  };
-
-  // Fetch notes
-  const fetchNotes = async (subjectId = null) => {
-    try {
-      const url = subjectId 
-        ? `${API_BASE}/api/notes?subject_id=${subjectId}`
-        : `${API_BASE}/api/notes`;
-      const response = await fetch(url, { headers: authHeaders() });
-      const data = await response.json();
-      setNotes(data.notes || []);
-    } catch (error) {
-      console.error("Error fetching notes:", error);
-    }
-  };
-
-  // Fetch stats
-  const fetchStats = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/study/stats`, { headers: authHeaders() });
-      const data = await response.json();
-      setStats(data);
-    } catch (error) {
-      console.error("Error fetching stats:", error);
-    }
-  };
-
-  useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      await Promise.all([fetchSubjects(), fetchNotes(), fetchStats()]);
-      setLoading(false);
-    };
-    loadData();
-  }, []);
-
-  // Create subject
-  const handleCreateSubject = async (e) => {
-    e.preventDefault();
-    try {
-      const formData = new FormData();
-      formData.append("name", subjectForm.name);
-      formData.append("description", subjectForm.description);
-
-      if (session?.user?.email) formData.append("email", session.user.email);
-
-      const response = await fetch(`${API_BASE}/api/subjects`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: formData,
-      });
-
-      if (response.ok) {
-        setSubjectForm({ name: "", description: "" });
-        setShowSubjectModal(false);
-        await fetchSubjects();
-      }
-    } catch (error) {
-      console.error("Error creating subject:", error);
-    }
-  };
-
-  // Upload file
-  const handleUploadFile = async (e) => {
-    e.preventDefault();
-    if (!selectedSubject || !uploadForm.file) return;
-
-    try {
-      const formData = new FormData();
-      formData.append("file", uploadForm.file);
-      formData.append("subject_id", selectedSubject.id);
-      formData.append("title", uploadForm.title || uploadForm.file.name);
-      formData.append("description", uploadForm.description);
-      if (session?.user?.email) formData.append("email", session.user.email);
-
-      const response = await fetch(`${API_BASE}/api/notes/upload`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json().catch(() => ({}));
-        setUploadForm({ title: "", description: "", file: null });
-        setShowUploadModal(false);
-        // Inform user that extraction was queued and refresh notes/stats
-        setUploadStatus((data && data.message) || "File uploaded — extraction queued");
-        // bump graph key to force KnowledgeGraph to refetch when visible
-        setGraphKey((k) => k + 1);
-        await fetchNotes(selectedSubject.id);
-        await fetchStats();
-        // clear status after a few seconds
-        setTimeout(() => setUploadStatus(null), 6000);
-      }
-    } catch (error) {
-      console.error("Error uploading file:", error);
-    }
-  };
-
-  // Delete note
-  const handleDeleteNote = async (noteId) => {
-    if (!confirm("Are you sure you want to delete this note?")) return;
-
-    try {
-      const response = await fetch(`${API_BASE}/api/notes/${noteId}`, {
-        method: "DELETE",
-        headers: authHeaders(),
-      });
-
-      if (response.ok) {
-        await fetchNotes(selectedSubject?.id);
-        await fetchStats();
-      }
-    } catch (error) {
-      console.error("Error deleting note:", error);
-    }
-  };
-
-  // Download note
-  const handleDownloadNote = (noteId) => {
-    window.open(`${API_BASE}/api/notes/${noteId}/download`, "_blank");
-  };
-
-  // Preview note
-  const handlePreviewNote = (note) => {
-    setPreviewNote(note);
-    setShowPreviewModal(true);
-  };
-
-  // Check if file can be previewed
-  const canPreview = (fileType) => {
-    const previewableTypes = ["PDF", "TXT", "MD", "JSON", "HTML", "CSS", "JS", "PNG", "JPG", "JPEG", "GIF", "SVG"];
-    return previewableTypes.includes(fileType?.toUpperCase());
-  };
-
-  const formatFileSize = (bytes) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + " " + sizes[i];
-  };
-
-  const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  };
-
-  if (loading) {
+    
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center">
-        <p className="text-white text-xl">Loading...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white relative overflow-hidden">
-      {/* Background effects */}
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-0 left-0 w-[600px] h-[600px] bg-gradient-to-br from-cyan-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
-        <div className="absolute bottom-0 right-0 w-[700px] h-[700px] bg-gradient-to-tl from-purple-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl"></div>
-      </div>
-
-      <div className="relative z-10 p-8">
-        {/* Header */}
-        <header className="mb-8">
-          <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-4xl font-black bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-400 bg-clip-text text-transparent">
-                Study Hub
-              </h1>
-              <p className="text-slate-400 mt-2">
-                Welcome back, {session?.user?.name || "User"}
-              </p>
+        <div className="group bg-gradient-to-br from-slate-700/60 via-slate-800/40 to-slate-900/50 rounded-xl p-4 border border-slate-600/40 hover:border-cyan-500/60 transition-all duration-300 hover:shadow-lg hover:shadow-cyan-500/20 hover:-translate-y-1 cursor-pointer">
+            <div className="flex items-start justify-between mb-3">
+                <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-cyan-500/20 text-cyan-300 group-hover:bg-cyan-500/30">#{index + 1}</span>
+                        <div className="w-1 h-1 rounded-full bg-gradient-to-r from-cyan-400 to-blue-400 group-hover:shadow-lg group-hover:shadow-cyan-500/50"></div>
+                    </div>
+                    <h4 className="text-sm font-semibold text-white line-clamp-2 group-hover:text-cyan-100 transition">{node.name}</h4>
+                </div>
             </div>
-            <button
-              onClick={() => setShowSubjectModal(true)}
-              className="bg-gradient-to-r from-cyan-500 to-blue-600 text-white px-6 py-3 rounded-lg hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 hover:scale-105 font-semibold"
-            >
-              + Add Subject
-            </button>
-          </div>
-
-          {/* Search Bar */}
-          <div className="mt-4 relative">
-            <div className="relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search notes, subjects, tasks..."
-                className="w-full bg-slate-900/80 border border-slate-700 text-white pl-12 pr-4 py-3 rounded-xl focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 placeholder-slate-500 transition-all"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => { setSearchQuery(""); setSearchResults(null); }}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                >
-                  ✕
-                </button>
-              )}
+            <div className="flex flex-wrap gap-2 mb-3">
+                <span className="px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-700/60 text-slate-300 inline-flex items-center gap-1" style={{ borderLeft: `3px solid ${DIFF_COLORS[node.difficulty] || '#3b82f6'}` }}>
+                    {getDifficultyEmoji()} {node.difficulty}
+                </span>
+                <span className="px-2 py-0.5 rounded-lg text-xs font-medium text-slate-300 bg-gradient-to-r from-purple-500/20 to-blue-500/20">{node.category || 'topic'}</span>
             </div>
-
-            {/* Search Results Dropdown */}
-            {searchResults && searchQuery && (
-              <div className="absolute top-full left-0 right-0 mt-2 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-20 max-h-80 overflow-y-auto">
-                {searching ? (
-                  <p className="p-4 text-slate-400 text-center">Searching...</p>
-                ) : (
-                  <>
-                    {(searchResults.notes?.length > 0 || searchResults.subjects?.length > 0 || searchResults.tasks?.length > 0) ? (
-                      <div className="p-3 space-y-3">
-                        {searchResults.subjects?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-bold text-purple-400 uppercase tracking-wider px-2 mb-1">Subjects</p>
-                            {searchResults.subjects.map((r) => {
-                              const subj = subjects.find((s) => s.id === r.id);
-                              return (
-                                <button
-                                  key={r.id}
-                                  onClick={() => {
-                                    const found = subjects.find((s) => s.id === r.id);
-                                    if (found) { setSelectedSubject(found); fetchNotes(found.id); }
-                                    setSearchQuery(""); setSearchResults(null);
-                                  }}
-                                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
-                                >
-                                  <span>📚</span>
-                                  <span className="text-white text-sm">{subj?.name || r.id}</span>
-                                  <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {searchResults.notes?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-bold text-blue-400 uppercase tracking-wider px-2 mb-1">Notes</p>
-                            {searchResults.notes.map((r) => {
-                              const note = notes.find((n) => n.id === r.id);
-                              return (
-                                <button
-                                  key={r.id}
-                                  onClick={() => {
-                                    if (note) handlePreviewNote(note);
-                                    setSearchQuery(""); setSearchResults(null);
-                                  }}
-                                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
-                                >
-                                  <span>📄</span>
-                                  <span className="text-white text-sm">{note?.title || r.id}</span>
-                                  <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {searchResults.tasks?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-bold text-cyan-400 uppercase tracking-wider px-2 mb-1">Tasks</p>
-                            {searchResults.tasks.map((r) => (
-                              <div
-                                key={r.id}
-                                className="px-3 py-2 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
-                              >
-                                <span>✅</span>
-                                <span className="text-white text-sm">{r.id}</span>
-                                <span className="ml-auto text-xs text-slate-500">score: {r.score}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="p-4 text-slate-400 text-center">No results found</p>
-                    )}
-                  </>
-                )}
-              </div>
+            {node.weight && (
+                <div className="relative h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
+                    <div className="absolute top-0 left-0 h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500" style={{width: `${getWeightPercentage()}%`}}></div>
+                </div>
             )}
-          </div>
-        </header>
-        {uploadStatus && (
-          <div className="mb-6 max-w-3xl">
-            <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">
-              {uploadStatus}
-            </div>
-          </div>
-        )}
-
-        {/* Stats */}
-        {stats && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-cyan-500/20 shadow-lg">
-              <p className="text-slate-400 text-sm mb-2">Total Subjects</p>
-              <p className="text-3xl font-bold text-cyan-400">{stats.totalSubjects}</p>
-            </div>
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-blue-500/20 shadow-lg">
-              <p className="text-slate-400 text-sm mb-2">Total Notes</p>
-              <p className="text-3xl font-bold text-blue-400">{stats.totalNotes}</p>
-            </div>
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-purple-500/20 shadow-lg">
-              <p className="text-slate-400 text-sm mb-2">Storage Used</p>
-              <p className="text-3xl font-bold text-purple-400">{formatFileSize(stats.totalSize)}</p>
-            </div>
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-pink-500/20 shadow-lg">
-              <p className="text-slate-400 text-sm mb-2">File Types</p>
-              <p className="text-3xl font-bold text-pink-400">{Object.keys(stats.fileTypes || {}).length}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Subjects Sidebar */}
-          <div className="lg:col-span-1">
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-cyan-500/20 shadow-2xl">
-              <h2 className="text-xl font-bold mb-4 flex items-center">
-                <span className="mr-2">📚</span>
-                Subjects
-              </h2>
-              <div className="space-y-2 max-h-[600px] overflow-y-auto custom-scrollbar">
-                <button
-                  onClick={() => {
-                    setSelectedSubject(null);
-                    fetchNotes();
-                  }}
-                  className={`w-full text-left p-3 rounded-lg transition-all ${
-                    !selectedSubject
-                      ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-400"
-                      : "bg-slate-800/50 hover:bg-slate-700/50 text-slate-300"
-                  }`}
-                >
-                  All Notes
-                </button>
-                {subjects.map((subject, index) => (
-                  <button
-                    key={`${subject.id ?? "subject"}-${index}`}
-                    onClick={() => {
-                      setSelectedSubject(subject);
-                      fetchNotes(subject.id);
-                    }}
-                    className={`w-full text-left p-3 rounded-lg transition-all ${
-                      selectedSubject?.id === subject.id
-                        ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-400"
-                        : "bg-slate-800/50 hover:bg-slate-700/50 text-slate-300"
-                    }`}
-                  >
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium">{subject.name}</span>
-                      <span className="text-xs bg-slate-700 px-2 py-1 rounded">
-                        {subject.notesCount || 0}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Notes Area */}
-          <div className="lg:col-span-3">
-            <div className="bg-slate-900/80 backdrop-blur-sm p-6 rounded-xl border border-purple-500/20 shadow-2xl">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold flex items-center">
-                  <span className="mr-2">📁</span>
-                  {selectedSubject ? selectedSubject.name : "All Notes"}
-                </h2>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setShowGraph((s) => !s)}
-                    className="bg-gradient-to-r from-green-400 to-teal-500 text-white px-3 py-2 rounded-lg hover:shadow-xl hover:shadow-green-400/30 transition-all duration-200 font-semibold text-sm"
-                  >
-                    {showGraph ? "Hide" : "View"} Knowledge Graph
-                  </button>
-
-                  {selectedSubject && (
-                    <button
-                      onClick={() => setShowUploadModal(true)}
-                      className="bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 py-2 rounded-lg hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 hover:scale-105 font-semibold text-sm"
-                    >
-                      + Upload File
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {notes.length === 0 ? (
-                <div className="text-center py-16">
-                  <p className="text-slate-400 text-lg mb-4">📭 No notes yet</p>
-                  <p className="text-slate-500 text-sm">
-                    {selectedSubject
-                      ? "Upload your first file to get started"
-                      : "Select a subject or create one to begin"}
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {notes.map((note, index) => (
-                    <div
-                      key={`${note.id ?? "note"}-${index}`}
-                      className="bg-gradient-to-br from-slate-800/80 to-slate-700/80 p-4 rounded-lg border border-purple-500/20 hover:border-purple-400/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-200"
-                    >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex-1">
-                          <p className="font-bold text-white text-sm mb-1 line-clamp-1">
-                            {note.title}
-                          </p>
-                          <p className="text-xs text-slate-400">{note.fileType}</p>
-                        </div>
-                        <span className="text-2xl">
-                          {note.fileType === "PDF" && "📄"}
-                          {note.fileType === "DOCX" && "📝"}
-                          {note.fileType === "TXT" && "📋"}
-                          {!["PDF", "DOCX", "TXT"].includes(note.fileType) && "📎"}
-                        </span>
-                      </div>
-
-                      {note.description && (
-                        <p className="text-xs text-slate-400 mb-3 line-clamp-2">
-                          {note.description}
-                        </p>
-                      )}
-
-                      <div className="flex items-center justify-between text-xs text-slate-500 mb-3">
-                        <span>{formatFileSize(note.fileSize)}</span>
-                        <span>{formatDate(note.uploadedAt)}</span>
-                      </div>
-
-                      <div className="flex gap-2">
-                        {canPreview(note.fileType) && (
-                          <button
-                            onClick={() => handlePreviewNote(note)}
-                            className="flex-1 bg-blue-500/20 text-blue-400 py-2 rounded hover:bg-blue-500/30 transition-colors text-xs font-semibold"
-                          >
-                            👁️ View
-                          </button>
-                        )}
-                        <button
-                          onClick={() => handleDownloadNote(note.id)}
-                          className="flex-1 bg-cyan-500/20 text-cyan-400 py-2 rounded hover:bg-cyan-500/30 transition-colors text-xs font-semibold"
-                        >
-                          ⬇️ Download
-                        </button>
-                        <button
-                          onClick={() => handleDeleteNote(note.id)}
-                          className="bg-red-500/20 text-red-400 px-3 py-2 rounded hover:bg-red-500/30 transition-colors text-xs font-semibold"
-                        >
-                          🗑️
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {showGraph && (
-                <div className="mt-6">
-                  {/* Lazy load KnowledgeGraph component to keep bundle small */}
-                  {/* KnowledgeGraph component (client-side) */}
-                  <KnowledgeGraph key={graphKey} />
-                </div>
-              )}
-            </div>
-          </div>
+            <p className="text-xs text-slate-400 mt-2">{getWeightPercentage()}% relevance</p>
         </div>
-      </div>
+    )
+}
 
-      {/* Add Subject Modal */}
-      {showSubjectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="w-full max-w-md bg-slate-900 p-8 rounded-2xl shadow-2xl border border-cyan-500/20">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-2xl font-bold text-white">Add Subject</h3>
-              <button
-                onClick={() => setShowSubjectModal(false)}
-                className="text-slate-400 hover:text-slate-200 text-xl"
-              >
-                ✕
-              </button>
-            </div>
-            <form onSubmit={handleCreateSubject} className="space-y-4">
-              <div>
-                <label className="block text-sm font-bold text-slate-300 mb-2">
-                  Subject Name
-                </label>
-                <input
-                  required
-                  type="text"
-                  value={subjectForm.name}
-                  onChange={(e) =>
-                    setSubjectForm({ ...subjectForm, name: e.target.value })
-                  }
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-lg focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
-                  placeholder="e.g., Data Structures"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-bold text-slate-300 mb-2">
-                  Description (Optional)
-                </label>
-                <textarea
-                  value={subjectForm.description}
-                  onChange={(e) =>
-                    setSubjectForm({ ...subjectForm, description: e.target.value })
-                  }
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-lg focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 resize-none"
-                  rows={3}
-                  placeholder="Brief description..."
-                />
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowSubjectModal(false)}
-                  className="flex-1 bg-slate-800 text-slate-300 py-2 rounded-lg hover:bg-slate-700 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 text-white py-2 rounded-lg hover:shadow-lg hover:shadow-cyan-500/30 transition-all"
-                >
-                  Create
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+/* ================================================================
+   STUDY PAGE - INTEGRATED NOTES UPLOAD + CONCEPT PREVIEW
+================================================================ */
+export default function StudyPage() {
+    const { data: session } = useSession()
+    const [uploadFile, setUploadFile] = useState(null)
+    const [uploading, setUploading] = useState(false)
+    const [buildText, setBuildText] = useState('')
+    const [building, setBuilding] = useState(false)
+    const [recentConcepts, setRecentConcepts] = useState([])
+    const [successMessage, setSuccessMessage] = useState('')
+    const [documents, setDocuments] = useState([])
+    const [showNotesViewer, setShowNotesViewer] = useState(false)
+    const [notes, setNotes] = useState([])
+    const [selectedNote, setSelectedNote] = useState(null)
+    const [notesLoading, setNotesLoading] = useState(false)
+    const [fileOperationStatus, setFileOperationStatus] = useState(null) // Track download/preview status
+    const email = session?.user?.email || ''
+    const MAX_CONCEPTS = 15
 
-      {/* Upload File Modal */}
-      {showUploadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="w-full max-w-md bg-slate-900 p-8 rounded-2xl shadow-2xl border border-purple-500/20">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-2xl font-bold text-white">Upload File</h3>
-              <button
-                onClick={() => setShowUploadModal(false)}
-                className="text-slate-400 hover:text-slate-200 text-xl"
-              >
-                ✕
-              </button>
-            </div>
-            <form onSubmit={handleUploadFile} className="space-y-4">
-              <div>
-                <label className="block text-sm font-bold text-slate-300 mb-2">
-                  File
-                </label>
-                <input
-                  required
-                  type="file"
-                  onChange={(e) =>
-                    setUploadForm({ ...uploadForm, file: e.target.files[0] })
-                  }
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-bold text-slate-300 mb-2">
-                  Title (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={uploadForm.title}
-                  onChange={(e) =>
-                    setUploadForm({ ...uploadForm, title: e.target.value })
-                  }
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20"
-                  placeholder="Custom title..."
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-bold text-slate-300 mb-2">
-                  Description (Optional)
-                </label>
-                <textarea
-                  value={uploadForm.description}
-                  onChange={(e) =>
-                    setUploadForm({ ...uploadForm, description: e.target.value })
-                  }
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-2 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 resize-none"
-                  rows={3}
-                  placeholder="Notes about this file..."
-                />
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowUploadModal(false)}
-                  className="flex-1 bg-slate-800 text-slate-300 py-2 rounded-lg hover:bg-slate-700 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white py-2 rounded-lg hover:shadow-lg hover:shadow-purple-500/30 transition-all"
-                >
-                  Upload
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+    // Fetch documents and update recent concepts
+    const fetchDocuments = useCallback(async () => {
+        if (!email) return
+        try {
+            const r = await fetch(`${API}/api/knowledge-graph/documents?email=${encodeURIComponent(email)}`)
+            if (!r.ok) throw new Error('Failed to fetch docs')
+            const d = await r.json()
+            setDocuments(d.documents || [])
 
-      {/* Preview Modal */}
-      {showPreviewModal && previewNote && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-6xl h-[90vh] bg-slate-900 rounded-2xl shadow-2xl border border-blue-500/20 flex flex-col">
-            <div className="flex justify-between items-center p-6 border-b border-slate-700">
-              <div>
-                <h3 className="text-xl font-bold text-white">{previewNote.title}</h3>
-                <p className="text-sm text-slate-400 mt-1">
-                  {previewNote.fileType} • {formatFileSize(previewNote.fileSize)} • {formatDate(previewNote.uploadedAt)}
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => handleDownloadNote(previewNote.id)}
-                  className="bg-cyan-500/20 text-cyan-400 px-4 py-2 rounded-lg hover:bg-cyan-500/30 transition-colors font-semibold"
-                >
-                  ⬇️ Download
-                </button>
-                <button
-                  onClick={() => {
-                    setShowPreviewModal(false);
-                    setPreviewNote(null);
-                  }}
-                  className="text-slate-400 hover:text-slate-200 text-2xl px-3"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
+            // Get concepts from the most recent document
+            if (d.documents && d.documents.length > 0) {
+                const latestDoc = d.documents[0].document
+                const graphRes = await fetch(`${API}/api/knowledge-graph?email=${encodeURIComponent(email)}&source_document=${encodeURIComponent(latestDoc)}`)
+                const graphData = await graphRes.json()
+                const sorted = (graphData.nodes || [])
+                    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+                    .slice(0, MAX_CONCEPTS)
+                setRecentConcepts(sorted)
+            }
+        } catch (e) {
+            console.error("fetchDocuments error:", e)
+            setDocuments([])
+        }
+    }, [email])
+
+    // Fetch user's notes
+    const fetchNotes = useCallback(async () => {
+        if (!email) return
+        setNotesLoading(true)
+        try {
+            const r = await fetch(`${API}/api/notes/recent?limit=20&email=${encodeURIComponent(email)}`)
+            if (!r.ok) throw new Error('Failed to fetch notes')
+            const d = await r.json()
+            setNotes(d.notes || [])
+        } catch (e) {
+            console.error("fetchNotes error:", e)
+            setNotes([])
+        } finally {
+            setNotesLoading(false)
+        }
+    }, [email])
+
+    useEffect(() => { fetchDocuments() }, [fetchDocuments])
+    useEffect(() => { fetchNotes() }, [fetchNotes])
+
+    const handleUpload = async () => {
+        if (!uploadFile) return
+        setUploading(true)
+        setSuccessMessage('')
+        try {
+            const fd = new FormData()
+            fd.append('file', uploadFile)
+            fd.append('email', email)
+            const uploadRes = await fetch(`${API}/api/notes/upload-simple`, { method: 'POST', body: fd })
+            const result = await uploadRes.json()
             
-            <div className="flex-1 overflow-hidden p-6">
-              {previewNote.fileType === "PDF" ? (
-                <iframe
-                  src={`${API_BASE}/api/notes/${previewNote.id}/preview`}
-                  className="w-full h-full rounded-lg border border-slate-700"
-                  title={previewNote.title}
-                />
-              ) : ["PNG", "JPG", "JPEG", "GIF", "SVG"].includes(previewNote.fileType?.toUpperCase()) ? (
-                <div className="w-full h-full flex items-center justify-center bg-slate-800 rounded-lg">
-                  <img
-                    src={`${API_BASE}/api/notes/${previewNote.id}/preview`}
-                    alt={previewNote.title}
-                    className="max-w-full max-h-full object-contain"
-                  />
-                </div>
-              ) : (
-                <iframe
-                  src={`${API_BASE}/api/notes/${previewNote.id}/preview`}
-                  className="w-full h-full rounded-lg border border-slate-700 bg-white"
-                  title={previewNote.title}
-                />
-              )}
+            if (!uploadRes.ok) {
+                throw new Error(result.detail || 'Upload failed')
+            }
+
+            setSuccessMessage(`✅ File uploaded successfully! "${uploadFile.name}" is now in your Study Notes.`)
+            setTimeout(() => {
+                fetchNotes()
+                setSuccessMessage('')
+            }, 2000)
+            setUploadFile(null)
+        } catch (e) {
+            console.error(e)
+            setSuccessMessage(`❌ Upload failed: ${e.message}`)
+        }
+        finally { setUploading(false) }
+    }
+
+    const handleBuildText = async () => {
+        if (!buildText.trim()) return
+        setBuilding(true)
+        setSuccessMessage('')
+        try {
+            const fd = new FormData()
+            fd.append('text', buildText)
+            fd.append('email', email)
+            fd.append('strategy', 'llm')
+            const buildRes = await fetch(`${API}/api/knowledge-graph/build`, { method: 'POST', body: fd })
+            await buildRes.json().catch(() => ({}))
+
+            setSuccessMessage('✅ Concepts extracted! Refreshing preview...')
+            setTimeout(() => {
+                fetchDocuments()
+                setSuccessMessage('')
+            }, 2000)
+            setBuildText('')
+        } catch (e) {
+            console.error(e)
+            setSuccessMessage('❌ Extraction failed. Please try again.')
+        }
+        finally { setBuilding(false) }
+    }
+
+    return (
+        <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-6 relative overflow-hidden">
+            {/* Animated background elements */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                <div className="absolute top-0 left-0 w-[500px] h-[500px] bg-gradient-to-br from-violet-500/10 via-purple-500/5 to-transparent rounded-full blur-3xl animate-pulse" />
+                <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-gradient-to-tl from-cyan-500/10 via-blue-500/5 to-transparent rounded-full blur-3xl animate-pulse animation-delay-2000" />
+                <div className="absolute top-1/2 left-1/3 w-[400px] h-[400px] bg-gradient-to-tr from-blue-500/8 via-cyan-500/5 to-transparent rounded-full blur-3xl animate-pulse animation-delay-4000" />
             </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+
+            <div className="relative z-10 max-w-7xl mx-auto">
+                {/* Header */}
+                <div className="mb-8 animate-fade-in">
+                    <div className="flex items-center justify-between mb-4">
+                        <div>
+                            <h1 className="text-5xl font-bold text-white flex items-center gap-3 mb-1">
+                                <span className="text-6xl">📚</span>
+                                <span className="bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">Smart Study Hub</span>
+                            </h1>
+                            <p className="text-slate-300 text-lg max-w-2xl">Transform your notes into interactive knowledge graphs with AI-powered concept extraction</p>
+                        </div>
+                        <div className="flex gap-3 flex-wrap justify-end">
+                            <button onClick={() => setShowNotesViewer(true)} className="px-5 py-2.5 bg-orange-500/80 hover:bg-orange-600/80 text-white rounded-lg hover:shadow-lg hover:shadow-orange-500/30 transition-all duration-300 flex items-center gap-2 font-medium border border-orange-600/50">
+                                📖 Notes ({notes.length})
+                            </button>
+                            <a href="/knowledge-tracing" className="px-5 py-2.5 bg-gradient-to-r from-rose-500 to-red-500 hover:from-rose-600 hover:to-red-600 text-white rounded-lg hover:shadow-xl hover:shadow-rose-500/30 transition-all duration-300 flex items-center gap-2 font-medium">
+                                Mastery Tracker
+                            </a>
+                            <a href="/dashboard" className="px-5 py-2.5 bg-slate-800/80 hover:bg-slate-700/80 text-slate-200 rounded-lg hover:shadow-lg transition-all duration-300 flex items-center gap-2 font-medium border border-slate-700/50">
+                                ← Dashboard
+                            </a>
+                            <a href="/knowledge-graph" className="px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white rounded-lg hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 flex items-center gap-2 font-medium">
+                                View Graph →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Success Message */}
+                {successMessage && (
+                    <div className="mb-6 p-5 bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-purple-500/10 border border-cyan-500/50 rounded-xl text-cyan-200 animate-in slide-in-from-top-2 duration-300 flex items-center gap-3 shadow-lg shadow-cyan-500/10">
+                        <span className="text-xl flex-shrink-0">✨</span>
+                        <span className="font-medium">{successMessage}</span>
+                    </div>
+                )}
+
+                {/* Main Grid */}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 mb-8">
+                    {/* Left: Upload Section */}
+                    <div className="space-y-6 animate-fade-in animation-delay-100">
+                        {/* Upload File Card */}
+                        <div className="group bg-gradient-to-br from-slate-800/80 via-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-2xl border border-slate-700/50 hover:border-cyan-500/40 p-8 transition-all duration-300 hover:shadow-xl hover:shadow-cyan-500/10 hover:-translate-y-1">
+                            <div className="flex items-center gap-3 mb-3">
+                                <span className="text-3xl">📄</span>
+                                <h2 className="text-2xl font-bold text-white">Upload Notes</h2>
+                            </div>
+                            <p className="text-slate-400 text-sm mb-6">PDF, DOCX, or TXT files — Perfect for lectures, textbooks, and notes</p>
+
+                            <label className="block border-3 border-dashed border-slate-600 group-hover:border-cyan-500/50 rounded-xl p-8 text-center cursor-pointer hover:bg-slate-800/50 transition-all duration-300 relative overflow-hidden">
+                                <input type="file" accept=".pdf,.txt,.docx" className="hidden" onChange={e => setUploadFile(e.target.files?.[0] || null)} />
+                                <div className="relative z-10">
+                                    <span className="text-6xl block mb-3 group-hover:scale-110 transition-transform duration-300 inline-block">📁</span>
+                                    <span className="text-slate-300 font-semibold text-lg block">{uploadFile ? uploadFile.name : 'Click to upload or drag & drop'}</span>
+                                    <p className="text-xs text-slate-500 mt-2">PDF, DOCX, or TXT — Max 50MB</p>
+                                </div>
+                            </label>
+
+                            <button onClick={handleUpload} disabled={!uploadFile || uploading}
+                                className="mt-6 w-full py-4 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-xl hover:shadow-cyan-500/30 transition-all duration-300 transform hover:scale-105 disabled:hover:scale-100 active:scale-95">
+                                {uploading ? (
+                                    <span className="flex items-center justify-center gap-3">
+                                        <span className="animate-spin rounded-full h-5 w-5 border-3 border-white border-t-transparent"></span>
+                                        <span>Processing…</span>
+                                    </span>
+                                ) : '🚀 Upload & Extract'}
+                            </button>
+                        </div>
+
+                        {/* Text Input Card */}
+                        <div className="group bg-gradient-to-br from-slate-800/80 via-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-2xl border border-slate-700/50 hover:border-purple-500/40 p-8 transition-all duration-300 hover:shadow-xl hover:shadow-purple-500/10 hover:-translate-y-1">
+                            <div className="flex items-center gap-3 mb-3">
+                                <span className="text-3xl">✍️</span>
+                                <h2 className="text-2xl font-bold text-white">Or Paste Text</h2>
+                            </div>
+                            <p className="text-slate-400 text-sm mb-4">Paste lecture notes, syllabus, or any educational content directly</p>
+
+                            <textarea value={buildText} onChange={e => setBuildText(e.target.value)} rows={6}
+                                placeholder="Paste your content here to instantly build a knowledge graph..."
+                                className="w-full bg-slate-900/50 border border-slate-600 hover:border-purple-500/30 focus:border-purple-500/60 rounded-xl p-4 text-slate-200 placeholder-slate-500 resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition-all duration-300 font-medium" />
+
+                            <button onClick={handleBuildText} disabled={!buildText.trim() || building}
+                                className="mt-4 w-full py-4 bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 text-white rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-xl hover:shadow-purple-500/30 transition-all duration-300 transform hover:scale-105 disabled:hover:scale-100 active:scale-95">
+                                {building ? (
+                                    <span className="flex items-center justify-center gap-3">
+                                        <span className="animate-spin rounded-full h-5 w-5 border-3 border-white border-t-transparent"></span>
+                                        <span>Extracting…</span>
+                                    </span>
+                                ) : '🧠 Extract Concepts'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Right: Concept Preview Section */}
+                    <div className="group bg-gradient-to-br from-slate-800/80 via-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-2xl border border-slate-700/50 hover:border-blue-500/40 p-8 transition-all duration-300 hover:shadow-xl hover:shadow-blue-500/10 animate-fade-in animation-delay-200 flex flex-col">
+                        <div className="flex items-center justify-between mb-6 pb-6 border-b border-slate-700/50">
+                            <div>
+                                <h2 className="text-2xl font-bold text-white flex items-center gap-2 mb-1">
+                                    <span>🧠</span>
+                                    Top Concepts
+                                </h2>
+                                <p className="text-slate-400 text-sm">{recentConcepts.length} of {documents.length > 0 ? documents[0].concept_count : 0} extracted</p>
+                            </div>
+                            {recentConcepts.length > 0 && (
+                                <div className="text-right bg-gradient-to-br from-cyan-500/20 to-blue-500/20 rounded-lg px-4 py-3 border border-cyan-500/30">
+                                    <p className="text-3xl font-bold bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">{recentConcepts.length}</p>
+                                    <p className="text-xs text-slate-400 font-medium">shown</p>
+                                </div>
+                            )}
+                        </div>
+
+                        {recentConcepts.length > 0 ? (
+                            <>
+                                {/* Concept Cards Grid */}
+                                <div className="grid grid-cols-2 gap-4 mb-6 flex-1 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
+                                    {recentConcepts.map((node, idx) => (
+                                        <ConceptCard key={node.id || node.name} node={node} index={idx} />
+                                    ))}
+                                </div>
+
+                                {/* Stats */}
+                                <div className="grid grid-cols-2 gap-4 pt-6 border-t border-slate-700">
+                                    <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/5 rounded-lg p-4 border border-emerald-500/20">
+                                        <p className="text-xs text-slate-400 font-medium mb-1">Avg. Difficulty</p>
+                                        <div className="flex items-end gap-2">
+                                            <p className="text-2xl font-bold text-emerald-400">
+                                                {recentConcepts.length > 0
+                                                    ? (recentConcepts.reduce((a, b) => a + (['easy', 'medium', 'hard'].indexOf(b.difficulty) || 1), 0) / recentConcepts.length).toFixed(1)
+                                                    : 'N/A'}
+                                            </p>
+                                            <p className="text-xs text-slate-500">/2</p>
+                                        </div>
+                                    </div>
+                                    <div className="bg-gradient-to-br from-cyan-500/10 to-blue-600/5 rounded-lg p-4 border border-cyan-500/20">
+                                        <p className="text-xs text-slate-400 font-medium mb-1">Coverage</p>
+                                        <p className="text-2xl font-bold text-cyan-400">
+                                            {documents.length > 0 ? Math.round((recentConcepts.length / (documents[0].concept_count || 1)) * 100) : 0}%
+                                        </p>
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                                <span className="text-7xl mb-4 opacity-50">📊</span>
+                                <p className="text-lg font-semibold text-slate-300 mb-2">No concepts extracted yet</p>
+                                <p className="text-sm text-slate-500">Upload a document or paste text to start building your knowledge graph</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Recent Documents Section */}
+                {documents.length > 1 && (
+                    <div className="group bg-gradient-to-br from-slate-800/60 via-slate-800/50 to-slate-900/50 backdrop-blur-xl rounded-2xl border border-slate-700/50 hover:border-slate-600/80 p-8 transition-all duration-300 hover:shadow-xl hover:shadow-slate-900/20 animate-fade-in animation-delay-300">
+                        <h3 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
+                            <span>📚</span>
+                            Recent Uploads
+                        </h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {documents.slice(0, 6).map((doc, idx) => (
+                                <div key={idx} className="group/doc bg-gradient-to-br from-slate-700/40 to-slate-800/40 rounded-lg p-5 border border-slate-600/30 hover:border-slate-500/60 transition-all duration-300 hover:shadow-lg hover:bg-slate-700/50 cursor-pointer hover:-translate-y-0.5">
+                                    <p className="font-semibold text-white text-sm truncate mb-2 group-hover/doc:text-cyan-300 transition">{doc.document}</p>
+                                    <div className="flex items-center justify-between">
+                                        <p className="text-xs text-slate-400">{doc.concept_count} concepts</p>
+                                        <span className="text-xs px-2 py-1 rounded bg-slate-700/50 text-slate-300">📖</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Notes Viewer Modal */}
+                {showNotesViewer && (
+                    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end transition-all duration-300 animate-in">
+                        <div className="w-full h-[85vh] bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-t border-slate-700/50 rounded-t-3xl shadow-2xl animate-in slide-in-from-bottom-5 duration-300 flex flex-col overflow-hidden">
+                            {/* Notes Header */}
+                            <div className="bg-gradient-to-r from-slate-800/80 to-slate-900/80 backdrop-blur-xl p-6 border-b border-slate-700/50 flex items-center justify-between">
+                                <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                                    <span>📖</span>
+                                    Your Study Notes
+                                </h2>
+                                <button onClick={() => setShowNotesViewer(false)} className="text-slate-400 hover:text-white transition text-2xl">✕</button>
+                            </div>
+
+                            {/* Notes Content */}
+                            <div className="flex-1 overflow-hidden flex">
+                                {/* Notes List */}
+                                <div className="w-80 border-r border-slate-700/50 overflow-y-auto custom-scrollbar bg-slate-900/30">
+                                    {notesLoading ? (
+                                        <div className="flex items-center justify-center h-full">
+                                            <div className="animate-spin rounded-full h-8 w-8 border-2 border-cyan-400 border-t-transparent"></div>
+                                        </div>
+                                    ) : notes.length === 0 ? (
+                                        <div className="flex flex-col items-center justify-center h-full text-slate-400 p-4">
+                                            <span className="text-5xl mb-3">📝</span>
+                                            <p className="text-center">No notes yet. Upload documents to get started!</p>
+                                        </div>
+                                    ) : (
+                                        <div className="p-4 space-y-3">
+                                            {notes.map((note, idx) => (
+                                                <button key={idx} onClick={() => setSelectedNote(note)} className={`w-full text-left p-4 rounded-lg border transition-all duration-200 group/note ${selectedNote?.id === note.id ? 'bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border-cyan-500/50 shadow-lg shadow-cyan-500/10' : 'bg-slate-700/30 border-slate-600/30 hover:border-slate-500/50 hover:bg-slate-700/40'}`}>
+                                                    <p className="font-semibold text-white text-sm truncate group-hover/note:text-cyan-300 transition">{note.title || note.filename}</p>
+                                                    <p className="text-xs text-slate-400 mt-1">{new Date(note.uploadedAt).toLocaleDateString()}</p>
+                                                    <p className="text-xs text-slate-500 mt-1">{Math.round(note.fileSize / 1024)} KB</p>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Note Preview */}
+                                <div className="flex-1 overflow-y-auto custom-scrollbar bg-slate-800/20 p-6">
+                                    {selectedNote ? (
+                                        <div className="animate-fade-in">
+                                            <div className="bg-gradient-to-br from-slate-800/50 to-slate-900/50 rounded-xl border border-slate-700/50 p-6 mb-4">
+                                                <h3 className="text-2xl font-bold text-white mb-2">{selectedNote.title || selectedNote.filename}</h3>
+                                                <div className="flex flex-wrap gap-3 text-sm text-slate-400">
+                                                    <span className="flex items-center gap-1">📅 {new Date(selectedNote.uploadedAt).toLocaleDateString()}</span>
+                                                    <span className="flex items-center gap-1">💾 {Math.round(selectedNote.fileSize / 1024)} KB</span>
+                                                    <span className="flex items-center gap-1">📄 {selectedNote.fileType}</span>
+                                                </div>
+                                                {selectedNote.description && (
+                                                    <p className="text-slate-300 mt-3">{selectedNote.description}</p>
+                                                )}
+                                            </div>
+                                            <div className="flex gap-3">
+                                                <button onClick={async () => {
+                                                    setFileOperationStatus({ type: 'download', status: 'loading' });
+                                                    try {
+                                                        const response = await fetch(`${API}/api/notes/${selectedNote.id}/download?email=${encodeURIComponent(email)}`);
+                                                        if (!response.ok) {
+                                                            const error = await response.json().catch(() => ({ detail: 'Download failed' }));
+                                                            setFileOperationStatus({ type: 'download', status: 'error', message: error.detail });
+                                                            return;
+                                                        }
+                                                        const blob = await response.blob();
+                                                        const url = window.URL.createObjectURL(blob);
+                                                        const a = document.createElement('a');
+                                                        a.href = url;
+                                                        a.download = selectedNote.filename || 'note';
+                                                        document.body.appendChild(a);
+                                                        a.click();
+                                                        window.URL.revokeObjectURL(url);
+                                                        document.body.removeChild(a);
+                                                        setFileOperationStatus({ type: 'download', status: 'success' });
+                                                        setTimeout(() => setFileOperationStatus(null), 2000);
+                                                    } catch (e) {
+                                                        setFileOperationStatus({ type: 'download', status: 'error', message: e.message });
+                                                    }
+                                                }} disabled={fileOperationStatus?.type === 'download' && fileOperationStatus?.status === 'loading'} className="flex-1 py-3 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all duration-300 flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-cyan-500/30">
+                                                    {fileOperationStatus?.type === 'download' && fileOperationStatus?.status === 'loading' ? (
+                                                        <><span className="animate-spin text-lg">⏳</span> Downloading...</>
+                                                    ) : fileOperationStatus?.type === 'download' && fileOperationStatus?.status === 'success' ? (
+                                                        <><span className="text-xl">✅</span> Downloaded</>
+                                                    ) : (
+                                                        <><span className="text-lg">⬇️</span> Download</>
+                                                    )}
+                                                </button>
+                                                <button onClick={async () => {
+                                                    setFileOperationStatus({ type: 'preview', status: 'loading' });
+                                                    try {
+                                                        const response = await fetch(`${API}/api/notes/${selectedNote.id}/preview?email=${encodeURIComponent(email)}`);
+                                                        if (!response.ok) {
+                                                            const error = await response.json().catch(() => ({ detail: 'Preview failed' }));
+                                                            setFileOperationStatus({ type: 'preview', status: 'error', message: error.detail });
+                                                            return;
+                                                        }
+                                                        const blob = await response.blob();
+                                                        const url = window.URL.createObjectURL(blob);
+                                                        window.open(url, '_blank');
+                                                        setFileOperationStatus({ type: 'preview', status: 'success' });
+                                                        setTimeout(() => setFileOperationStatus(null), 2000);
+                                                    } catch (e) {
+                                                        setFileOperationStatus({ type: 'preview', status: 'error', message: e.message });
+                                                    }
+                                                }} disabled={fileOperationStatus?.type === 'preview' && fileOperationStatus?.status === 'loading'} className="flex-1 py-3 bg-slate-700/50 hover:bg-slate-700/70 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all duration-300 flex items-center justify-center gap-2 border border-slate-600/50">
+                                                    {fileOperationStatus?.type === 'preview' && fileOperationStatus?.status === 'loading' ? (
+                                                        <><span className="animate-spin text-lg">⏳</span> Opening...</>
+                                                    ) : fileOperationStatus?.type === 'preview' && fileOperationStatus?.status === 'success' ? (
+                                                        <><span className="text-xl">✅</span> Opened</>
+                                                    ) : (
+                                                        <><span className="text-lg">👁️</span> Preview</>
+                                                    )}
+                                                </button>
+                                            </div>
+                                            {/* Error message display */}
+                                            {fileOperationStatus?.status === 'error' && (
+                                                <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                                    <p className="text-red-300 text-sm"><span className="font-bold">Error:</span> {fileOperationStatus.message}</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                                            <span className="text-6xl mb-3 opacity-50">👈</span>
+                                            <p className="text-lg">Select a note to view details</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <style jsx>{`
+                .custom-scrollbar::-webkit-scrollbar {
+                    width: 6px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: rgba(51, 65, 85, 0.2);
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: rgba(139, 92, 246, 0.6);
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: rgba(139, 92, 246, 0.8);
+                }
+                
+                @keyframes fade-in {
+                    from {
+                        opacity: 0;
+                        transform: translateY(10px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                
+                @keyframes slide-in-from-top {
+                    from {
+                        opacity: 0;
+                        transform: translateY(-10px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                
+                .animate-fade-in {
+                    animation: fade-in 0.6s ease-out forwards;
+                    opacity: 0;
+                }
+                
+                .animation-delay-100 {
+                    animation-delay: 0.1s;
+                }
+                
+                .animation-delay-200 {
+                    animation-delay: 0.2s;
+                }
+                
+                .animation-delay-300 {
+                    animation-delay: 0.3s;
+                }
+                
+                .animation-delay-2000 {
+                    animation-delay: 2s;
+                }
+                
+                .animation-delay-4000 {
+                    animation-delay: 4s;
+                }
+            `}</style>
+        </main>
+    )
 }

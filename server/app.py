@@ -112,9 +112,10 @@ _include_app(insights_app)
 _include_app(placement_app)
 
 # ─── Cognitive Learning Ecosystem ───
-if HAS_KG:
-    _include_app(kg_app)
-    print("[OK] Knowledge Graph module loaded")
+# NOTE: /api/knowledge-graph/* routes are now inlined in study_app (study.py)
+# so kg_app is intentionally skipped to avoid duplicate route registration.
+# if HAS_KG: _include_app(kg_app)  ← disabled; routes live in study_app now
+print("[OK] Knowledge Graph routes loaded via study module")
 if HAS_MENTOR:
     _include_app(mentor_app)
     print("[OK] AI Mentor module loaded")
@@ -134,11 +135,12 @@ async def health_check() -> dict[str, str]:
             "scheduler": True,
             "study": True,
             "insights": True,
-            "placement": True,
+            "career": HAS_CAREER,  # Primary career experience (formerly separated as placement + career_readiness)
+            "placement": "legacy_compatibility_only",  # Legacy routes delegate to /api/career/*
             "knowledge_graph": HAS_KG,
             "ai_mentor": HAS_MENTOR,
             "knowledge_tracing": HAS_KT,
-            "career_readiness": HAS_CAREER,
+            "career_readiness": HAS_CAREER,  # Kept for backward compatibility in status reporting
         },
         "knowledge_graph_pipeline": {
             "preprocessing_stages": [
@@ -306,4 +308,4 @@ async def shutdown_driver() -> None:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 5000)), reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)), reload=False)

@@ -35,12 +35,11 @@ from graph_helpers import ensure_user_and_day, normalize_day
 
 # ─── Gemini for quiz generation ───
 try:
-    import google.generativeai as genai
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not set")
-    genai.configure(api_key=GEMINI_API_KEY)
-    _gemini = genai.GenerativeModel("gemini-2.5-flash")
+    from ai_client import build_text_model
+
+    _gemini = build_text_model()
+    if not _gemini:
+        raise ValueError("No AI model configured")
     HAS_GEMINI = True
 except Exception:
     HAS_GEMINI = False
