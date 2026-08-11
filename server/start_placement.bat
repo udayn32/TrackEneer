@@ -1,0 +1,3 @@
+@echo off
+echo Starting Placement Backend Server...
+python placement.py

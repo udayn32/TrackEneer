@@ -1,0 +1,3 @@
+@echo off
+echo Starting Insights Backend Server...
+python insights.py

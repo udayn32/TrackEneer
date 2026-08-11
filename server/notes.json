@@ -1,0 +1,35 @@
+[
+  {
+    "id": "8d1c755a-fc64-48c5-9954-2253386739eb",
+    "subjectId": "75bad0b4-2423-4253-ae42-e3861ed21228",
+    "title": "Adobe Scan 03 Feb 2025.pdf",
+    "description": "",
+    "filename": "Adobe Scan 03 Feb 2025.pdf",
+    "storedFilename": "8d1c755a-fc64-48c5-9954-2253386739eb.pdf",
+    "fileType": "PDF",
+    "fileSize": 3527324,
+    "uploadedAt": "2025-10-21T16:28:59.882452"
+  },
+  {
+    "id": "5881e78b-4214-42e6-b5bd-e80da0e50c8e",
+    "subjectId": "ab74dcca-1e38-4bd2-91bc-d4ea458f333d",
+    "title": "Adobe Scan 03 Feb 2025.pdf",
+    "description": "",
+    "filename": "Adobe Scan 03 Feb 2025.pdf",
+    "storedFilename": "5881e78b-4214-42e6-b5bd-e80da0e50c8e.pdf",
+    "fileType": "PDF",
+    "fileSize": 3527324,
+    "uploadedAt": "2025-10-21T16:30:21.658752"
+  },
+  {
+    "id": "042135fa-aa3e-469e-8490-c503e9dff2ab",
+    "subjectId": "f5096482-d3ff-4ef6-af81-9ce21c2d80ba",
+    "title": "Sample dummy document",
+    "description": "",
+    "filename": "Fake_News_Detection_System_Using_Logistic_Regressi.pdf",
+    "storedFilename": "042135fa-aa3e-469e-8490-c503e9dff2ab.pdf",
+    "fileType": "PDF",
+    "fileSize": 271204,
+    "uploadedAt": "2025-10-24T12:43:14.462005"
+  }
+]

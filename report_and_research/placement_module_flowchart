@@ -1,0 +1,20 @@
+// Placement Module Flowchart
+digraph {
+	rankdir=TB size=8
+	A [label="User enters company name" shape=box]
+	B [label="Check 24-hour cache" shape=diamond]
+	C [label="Return cached report" shape=box]
+	D [label="Generate prompt for Gemini AI" shape=box]
+	E [label="Call Gemini AI API" shape=box]
+	F [label="Receive company research report" shape=box]
+	G [label="Cache response" shape=box]
+	H [label="Display structured report" shape=box]
+	A -> B
+	B -> C [label="Cache hit"]
+	B -> D [label="Cache miss"]
+	D -> E
+	E -> F
+	F -> G
+	G -> H
+	C -> H
+}
