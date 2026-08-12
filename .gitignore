@@ -91,6 +91,7 @@ notification-service/dist/
 
 # Documentation / markdown files
 *.md
+!README.md
 COGNITIVE_ECOSYSTEM_PLAN.md
 DASHBOARD_REDESIGN.md
 DEBUG_SCHEDULE.md
