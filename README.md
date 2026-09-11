@@ -1,6 +1,7 @@
 # TrackEneer
 
-TrackEneer is a student productivity and learning platform with scheduling, study support, placement preparation, insights, mentoring, and knowledge graph features.
+Trackeneer: An AI-based Personalized Learning
+System for Engineering Students
 
 ## Project Structure
 
